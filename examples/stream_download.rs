@@ -1,6 +1,6 @@
 use std::{error::Error, num::NonZeroUsize, path::PathBuf, str::FromStr};
 
-use rodio_hls_client::{config::ConfigBuilder, stream::HLSStream};
+use hls_client::{config::ConfigBuilder, stream::HLSStream};
 use stream_download::{
     storage::{adaptive::AdaptiveStorageProvider, temp::TempStorageProvider},
     Settings, StreamDownload,
@@ -10,7 +10,7 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new("rodio_hls_client=trace"))
+        .with_env_filter(EnvFilter::new("hls_client=trace"))
         .with_line_number(true)
         .with_file(true)
         .init();

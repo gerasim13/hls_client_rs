@@ -629,6 +629,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hls_client"
+version = "1.0.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "hls_m3u8",
+ "libmpv2",
+ "mediatype",
+ "reqwest",
+ "rodio",
+ "stream-download",
+ "thiserror 2.0.12",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "hls_m3u8"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1631,25 +1650,6 @@ dependencies = [
  "hound",
  "lewton",
  "symphonia",
-]
-
-[[package]]
-name = "rodio_hls_client"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "hls_m3u8",
- "libmpv2",
- "mediatype",
- "reqwest",
- "rodio",
- "stream-download",
- "thiserror 2.0.12",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
 ]
 
 [[package]]

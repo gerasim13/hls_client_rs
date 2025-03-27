@@ -67,11 +67,11 @@ impl ConfigBuilder {
     }
 
     /// Sets the stream selection callback.
-    pub fn stream_selection_cb(
+    pub fn variant_stream_selector(
         mut self,
-        cb: Arc<Box<dyn Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync>>,
+        cb: impl Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync + 'static,
     ) -> Self {
-        self.stream_selection_cb = Some(cb);
+        self.stream_selection_cb = Some(Arc::new(Box::new(cb)));
         self
     }
 

@@ -211,7 +211,7 @@ impl HLSStream {
                 let resp =
                     Self::reload_playlist(&media_playlist, stream_details.clone(), false).await;
 
-                if let Ok(_) = resp {
+                if resp.is_ok() {
                     target_duration = stream_details.read().unwrap().target_duration;
                 } else {
                     break;

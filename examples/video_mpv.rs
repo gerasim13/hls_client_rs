@@ -7,11 +7,11 @@ use std::slice;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
+use hls_client::config::ConfigBuilder;
+use hls_client::stream::HLSStream;
 use libmpv2::events::{Event, EventContext};
 use libmpv2::protocol::Protocol;
 use libmpv2::Mpv;
-use rodio_hls_client::config::ConfigBuilder;
-use rodio_hls_client::stream::HLSStream;
 use stream_download::storage::adaptive::AdaptiveStorageProvider;
 use stream_download::storage::temp::TempStorageProvider;
 use stream_download::{Settings, StreamDownload};
