@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use rodio_hls_client::decoder::HLSDecoder;
+use rodio_hls_client::{config::ConfigBuilder, decoder::HLSDecoder};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -11,8 +11,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .with_file(true)
         .init();
 
-    let decoder =
-        HLSDecoder::new("https://streams.radiomast.io/ref-128k-mp3-stereo/hls.m3u8").await?;
+    let decoder = HLSDecoder::new(
+        ConfigBuilder::new()
+            .url("https://streams.radiomast.io/ref-128k-mp3-stereo/hls.m3u8")?
+            .build()?,
+    )
+    .await?;
 
     let handle = tokio::task::spawn_blocking(move || {
         let (_stream, handle) = rodio::OutputStream::try_default()?;

@@ -20,7 +20,7 @@ rodio = "0.20.1"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 stream-download = { version = "0.16.1" }
 tokio = { version = "1.44.1", features = ["macros", "rt-multi-thread"] }
-
+libmpv2 = "4.1.0"
 
 [features]
 default = ["blocking", "reqwest-native-tls", "stream_download", "tracing"]
@@ -37,6 +37,10 @@ doc-scrape-examples = true
 
 [[example]]
 name = "stream_download"
+required-features = ["stream_download", "reqwest-native-tls"]
+
+[[example]]
+name = "video_mpv"
 required-features = ["stream_download", "reqwest-native-tls"]
 
 doc-scrape-examples = true

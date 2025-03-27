@@ -22,6 +22,9 @@ pub enum HLSDecoderError {
 
     #[error("Failed to parse URL: {0}")]
     URLParseError(#[from] url::ParseError),
+
+    #[error("URL must be provided before building Config")]
+    MissingURLError,
 }
 
 #[cfg(feature = "stream_download")]

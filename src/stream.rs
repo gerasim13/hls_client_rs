@@ -9,7 +9,7 @@ use std::{
 
 use bytes::Bytes;
 use futures::Stream;
-use hls_m3u8::{tags::VariantStream, types::PlaylistType, MediaPlaylist};
+use hls_m3u8::{tags::VariantStream, types::PlaylistType, MasterPlaylist, MediaPlaylist};
 use mediatype::MediaTypeBuf;
 use reqwest::{
     header::{self, HeaderMap},
@@ -18,9 +18,8 @@ use reqwest::{
 
 #[cfg(feature = "stream_download")]
 use stream_download::source::SourceStream;
-use tracing::debug;
 
-use crate::errors::HLSDecoderError;
+use crate::{config::Config, errors::HLSDecoderError};
 
 pub type ReqwestStreamItem = Result<Bytes, reqwest::Error>;
 pub type ReqwestStream = Box<dyn Stream<Item = ReqwestStreamItem> + Unpin + Send + Sync>;
@@ -46,12 +45,18 @@ impl HLSStream {
     async fn handle_master_playlist(
         playlist: &str,
         src: &str,
+        stream_selection_cb: Option<
+            Arc<Box<dyn Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync>>,
+        >,
     ) -> Result<Option<String>, HLSDecoderError> {
         if let Ok(master_playlist) = hls_m3u8::MasterPlaylist::try_from(playlist) {
             #[cfg(feature = "tracing")]
             tracing::info!("Master playlist detected");
 
-            if let Some(variant) = master_playlist.variant_streams.first() {
+            let stream_selection_cb = stream_selection_cb
+                .unwrap_or(Arc::new(Box::new(|p| p.variant_streams.first().cloned())));
+
+            if let Some(variant) = stream_selection_cb(master_playlist) {
                 let uri = match variant {
                     VariantStream::ExtXStreamInf { uri, .. } => uri,
                     VariantStream::ExtXIFrame { uri, .. } => uri,
@@ -96,7 +101,10 @@ impl HLSStream {
 
         // By default don't treat stream as Event but as VOD
         let is_infinite_stream =
-            media_playlist.playlist_type.unwrap_or(PlaylistType::Vod) == PlaylistType::Event;
+            media_playlist.playlist_type.unwrap_or(PlaylistType::Event) == PlaylistType::Event;
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!("Stream is infinite {}", is_infinite_stream);
 
         let segments = media_playlist
             .segments
@@ -200,7 +208,9 @@ impl HLSStream {
         stream_details: Arc<RwLock<StreamDetails>>,
         reconnect: bool,
     ) -> Result<bool, HLSDecoderError> {
+        #[cfg(feature = "tracing")]
         tracing::debug!("Reloading playlist");
+
         let resp = Self::parse_playlist(media_playlist_url).await?;
 
         let should_seek = {
@@ -229,10 +239,10 @@ impl HLSStream {
             } else {
                 (0, false)
             };
+
+            #[cfg(feature = "tracing")]
             tracing::debug!(
-                "Should seek {}, {}, {:?}, {}, {:?}",
-                should_seek,
-                reconnect,
+                "old_url: {:?}, old_index: {}, newsegments: {:?}",
                 old_url,
                 old_index,
                 stream_details.segments
@@ -246,6 +256,8 @@ impl HLSStream {
                         .streams
                         .get_mut(new_current_index)
                         .expect("Stream should exist");
+
+                    #[cfg(feature = "tracing")]
                     tracing::debug!("Restoring old stream at index {}", new_current_index);
                     *item = old_active_stream;
 
@@ -278,19 +290,20 @@ impl HLSStream {
         });
     }
 
-    pub async fn try_new<T>(url: T) -> Result<Self, HLSDecoderError>
-    where
-        T: IntoUrl,
-    {
-        let resp = reqwest::get(url.as_str()).await?;
+    pub async fn try_new(config: Config) -> Result<Self, HLSDecoderError> {
+        let resp = reqwest::get(config.get_url()).await?;
         let playlist_str = resp.text().await?;
 
-        let playlist = if let Some(media_playlist) =
-            Self::handle_master_playlist(playlist_str.as_str(), url.as_str()).await?
+        let playlist = if let Some(media_playlist) = Self::handle_master_playlist(
+            playlist_str.as_str(),
+            config.get_url().as_str(),
+            config.get_stream_selection_cb(),
+        )
+        .await?
         {
             media_playlist
         } else {
-            url.as_str().to_string()
+            config.get_url().as_str().to_string()
         };
 
         let resp = Self::parse_playlist(&playlist.parse()?).await?;
@@ -399,8 +412,6 @@ impl HLSStream {
     }
 
     pub fn content_length(&self) -> Option<u64> {
-        // Infinite content length
-        // return None;
         self.stream_details.read().unwrap().content_length.clone()
     }
 }
@@ -481,6 +492,7 @@ impl Stream for HLSStream {
             stream_details = this.stream_details.read().unwrap();
         }
 
+        #[cfg(feature = "tracing")]
         tracing::trace!(
             "Readable streams ended. Returning {}",
             if finished_return.is_pending() {
@@ -496,7 +508,7 @@ impl Stream for HLSStream {
 
 #[cfg(feature = "stream_download")]
 impl SourceStream for HLSStream {
-    type Params = String;
+    type Params = Config;
 
     type StreamCreationError = HLSDecoderError;
 

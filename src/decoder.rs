@@ -2,9 +2,8 @@ use std::io::{Read, Seek};
 
 use bytes::{Buf, Bytes};
 use futures::executor::{block_on, block_on_stream, BlockingStream};
-use reqwest::IntoUrl;
 
-use crate::{errors::HLSDecoderError, stream::HLSStream};
+use crate::{config::Config, errors::HLSDecoderError, stream::HLSStream};
 
 pub struct HLSDecoder {
     stream: BlockingStream<HLSStream>,
@@ -13,9 +12,9 @@ pub struct HLSDecoder {
 }
 
 impl HLSDecoder {
-    pub async fn new(url: impl IntoUrl) -> Result<Self, HLSDecoderError> {
+    pub async fn new(config: Config) -> Result<Self, HLSDecoderError> {
         Ok(Self {
-            stream: block_on_stream(HLSStream::try_new(url).await?),
+            stream: block_on_stream(HLSStream::try_new(config).await?),
             buffer: None,
             current_pos: 0,
         })
