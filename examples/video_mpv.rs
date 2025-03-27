@@ -10,11 +10,8 @@ use std::sync::OnceLock;
 use libmpv2::events::{Event, EventContext};
 use libmpv2::protocol::Protocol;
 use libmpv2::Mpv;
-use reqwest::Client;
 use rodio_hls_client::config::ConfigBuilder;
 use rodio_hls_client::stream::HLSStream;
-use stream_download::http::HttpStream;
-use stream_download::source::{DecodeError, SourceStream};
 use stream_download::storage::adaptive::AdaptiveStorageProvider;
 use stream_download::storage::temp::TempStorageProvider;
 use stream_download::{Settings, StreamDownload};
@@ -81,9 +78,11 @@ fn open(_: &mut (), uri: &str) -> Stream {
         .block_on(async move {
             let settings = Settings::default();
             let reader = StreamDownload::new::<HLSStream>(
-                ConfigBuilder::new().url(uri)?.build()?,
+                ConfigBuilder::new()
+                    .url(uri.replace("stream://", ""))?
+                    .build()?,
                 AdaptiveStorageProvider::new(
-                    TempStorageProvider::new_in(PathBuf::from_str("./").unwrap()),
+                    TempStorageProvider::new(),
                     NonZeroUsize::new((settings.get_prefetch_bytes() * 2) as usize).unwrap(),
                 ),
                 settings,

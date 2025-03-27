@@ -1,6 +1,6 @@
 use std::{error::Error, num::NonZeroUsize, path::PathBuf, str::FromStr};
 
-use rodio_hls_client::{config::ConfigBuilder, decoder::HLSDecoder, stream::HLSStream};
+use rodio_hls_client::{config::ConfigBuilder, stream::HLSStream};
 use stream_download::{
     storage::{adaptive::AdaptiveStorageProvider, temp::TempStorageProvider},
     Settings, StreamDownload,
@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .url("https://streams.radiomast.io/ref-128k-mp3-stereo/hls.m3u8")?
             .build()?,
         AdaptiveStorageProvider::new(
-            TempStorageProvider::new_in(PathBuf::from_str("./").unwrap()),
+            TempStorageProvider::new(),
             NonZeroUsize::new((settings.get_prefetch_bytes() * 2) as usize).unwrap(),
         ),
         settings,

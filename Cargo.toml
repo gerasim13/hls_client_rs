@@ -23,7 +23,7 @@ tokio = { version = "1.44.1", features = ["macros", "rt-multi-thread"] }
 libmpv2 = "4.1.0"
 
 [features]
-default = ["blocking", "reqwest-native-tls", "stream_download", "tracing"]
+default = ["blocking", "reqwest-native-tls"]
 blocking = ["futures/executor"]
 stream_download = ["dep:stream-download"]
 tracing = ["dep:tracing"]

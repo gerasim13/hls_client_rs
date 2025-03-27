@@ -31,7 +31,7 @@ impl Config {
     pub(crate) fn get_stream_selection_cb(
         &self,
     ) -> Option<Arc<Box<dyn Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync>>> {
-        return self.stream_selection_cb.clone();
+        self.stream_selection_cb.clone()
     }
 
     pub(crate) fn get_url(&self) -> Url {
@@ -43,6 +43,12 @@ pub struct ConfigBuilder {
     url: Option<Url>,
     stream_selection_cb:
         Option<Arc<Box<dyn Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync>>>,
+}
+
+impl Default for ConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConfigBuilder {
