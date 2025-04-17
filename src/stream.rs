@@ -63,7 +63,11 @@ impl HLSStream {
             stream_details,
         };
 
-        ret.spawn_reload_loop();
+        // Reload playlist only for infinite streams
+        if ret.content_length().is_none() {
+            ret.spawn_reload_loop();
+        }
+
         Ok(ret)
     }
 
@@ -121,6 +125,7 @@ impl HLSStream {
         let content_type = extract_content_type(segment_responses.first());
         let headers = extract_headers(&segment_responses);
         let streams = build_streams(segment_responses);
+
         Ok(StreamDetails {
             content_length,
             content_type,
@@ -350,10 +355,17 @@ impl Stream for HLSStream {
             stream_details = this.stream_details.read().unwrap();
         }
 
+        #[cfg(feature = "tracing")]
+        tracing::trace!("Finished all streams, ending stream if finite");
+
+        // After the loop ends, stream_details will always be locked by the last iteration
+        let res = get_finished_poll_result(&stream_details);
+        drop(stream_details);
+
         // Mark as finished if we've exhausted all streams
         // This doesn't always mean that the stream has ended. In case of infinite streams, we just have to wait for a playlist refresh
         this.stream_details.write().unwrap().finished = true;
-        get_finished_poll_result(&stream_details)
+        return res;
     }
 }
 
@@ -381,8 +393,6 @@ fn poll_current_stream(
             std::task::Poll::Ready(Some(item)) => Some(std::task::Poll::Ready(Some(item))),
             std::task::Poll::Ready(None) => {
                 // Move to the next stream if the current one is exhausted
-                #[cfg(feature = "tracing")]
-                tracing::trace!("Stream at index {} is exhausted", idx);
                 None
             }
             std::task::Poll::Pending => Some(std::task::Poll::Pending),

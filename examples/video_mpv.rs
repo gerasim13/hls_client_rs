@@ -2,9 +2,7 @@ use std::env::args;
 use std::error::Error;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::slice;
-use std::str::FromStr;
 use std::sync::OnceLock;
 
 use hls_client::config::ConfigBuilder;
