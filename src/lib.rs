@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 pub mod config;
 #[cfg(feature = "blocking")]
 pub mod decoder;
