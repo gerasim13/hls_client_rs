@@ -16,7 +16,7 @@ use stream_download::{Settings, StreamDownload};
 use tracing_subscriber::EnvFilter;
 
 struct Stream {
-    reader: StreamDownload<AdaptiveStorageProvider<TempStorageProvider>>,
+    reader: StreamDownload<AdaptiveStorageProvider<TempStorageProvider, TempStorageProvider>>,
     content_length: u64,
 }
 
