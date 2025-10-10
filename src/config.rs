@@ -61,8 +61,11 @@ impl ConfigBuilder {
     }
 
     /// Sets the URL for the configuration.
-    pub fn url<T: IntoUrl>(mut self, url: T) -> Result<Self, HLSDecoderError> {
-        self.url = Some(url.into_url()?);
+    pub fn url<T: TryInto<Url>>(mut self, url: T) -> Result<Self, HLSDecoderError> {
+        self.url = Some(
+            url.try_into()
+                .map_err(|_| HLSDecoderError::MissingURLError)?,
+        );
         Ok(self)
     }
 
