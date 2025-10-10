@@ -14,6 +14,7 @@ use stream_download::storage::adaptive::AdaptiveStorageProvider;
 use stream_download::storage::temp::TempStorageProvider;
 use stream_download::{Settings, StreamDownload};
 use tracing_subscriber::EnvFilter;
+use url::Url;
 
 struct Stream {
     reader: StreamDownload<AdaptiveStorageProvider<TempStorageProvider, TempStorageProvider>>,
@@ -77,7 +78,7 @@ fn open(_: &mut (), uri: &str) -> Stream {
             let settings = Settings::default();
             let reader = StreamDownload::new::<HLSStream>(
                 ConfigBuilder::new()
-                    .url(uri.replace("stream://", ""))?
+                    .url(uri.replace("stream://", "").parse::<Url>().unwrap())?
                     .build()?,
                 AdaptiveStorageProvider::new(
                     TempStorageProvider::new(),
