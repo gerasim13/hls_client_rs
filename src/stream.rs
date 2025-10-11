@@ -35,6 +35,7 @@ pub(crate) struct StreamDetails {
 
 pub struct HLSStream {
     pub(crate) media_playlist_url: Url,
+    pub(crate) base_url: Option<Url>,
     pub(crate) stream_details: Arc<RwLock<StreamDetails>>,
 }
 
@@ -56,6 +57,7 @@ impl HLSStream {
         let playlist = if let Some(media_playlist) = Self::handle_master_playlist(
             playlist_str.as_str(),
             config.get_url().as_str(),
+            config.get_base_url(),
             config.get_stream_selection_cb(),
         )
         .await?
@@ -65,11 +67,12 @@ impl HLSStream {
             config.get_url().as_str().to_string()
         };
 
-        let resp = Self::parse_playlist(&playlist.parse()?).await?;
+        let resp = Self::parse_playlist(&playlist.parse()?, config.get_base_url().as_ref()).await?;
         let stream_details = Arc::new(RwLock::new(resp));
 
         let ret = Self {
             media_playlist_url: playlist.parse()?,
+            base_url: config.get_base_url(),
             stream_details,
         };
 
@@ -84,6 +87,7 @@ impl HLSStream {
     async fn handle_master_playlist(
         playlist: &str,
         src: &str,
+        base_url: Option<Url>,
         stream_selection_cb: Option<
             Arc<Box<dyn Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync>>,
         >,
@@ -103,8 +107,9 @@ impl HLSStream {
 
                 let stream_url = if uri.starts_with("http") {
                     uri.to_string()
+                } else if let Some(base) = base_url {
+                    format!("{}/{}", base, uri)
                 } else {
-                    // Resolve relative path
                     let base_url = src.trim_end_matches(".m3u8");
                     format!("{}/{}", base_url, uri)
                 };
@@ -120,11 +125,14 @@ impl HLSStream {
         Ok(None)
     }
 
-    async fn parse_playlist(media_playlist_url: &Url) -> Result<StreamDetails, HLSDecoderError> {
+    async fn parse_playlist(
+        media_playlist_url: &Url,
+        base_url: Option<&Url>,
+    ) -> Result<StreamDetails, HLSDecoderError> {
         let playlist_text = fetch_playlist(media_playlist_url).await?;
         let media_playlist = parse_media_playlist(&playlist_text).await?.into_owned();
         let is_infinite_stream = is_infinite_stream(&media_playlist);
-        let segment_urls = resolve_segment_urls(&media_playlist, media_playlist_url);
+        let segment_urls = resolve_segment_urls(&media_playlist, media_playlist_url, base_url);
         let segment_responses = fetch_segment_responses(&segment_urls).await;
         let content_lengths = compute_content_lengths(&segment_responses);
         let content_length = if is_infinite_stream {
@@ -153,12 +161,13 @@ impl HLSStream {
     pub(crate) async fn reload_playlist(
         media_playlist_url: &Url,
         stream_details: Arc<RwLock<StreamDetails>>,
+        base_url: Option<&Url>,
         reconnect: bool,
     ) -> Result<bool, HLSDecoderError> {
         #[cfg(feature = "tracing")]
         tracing::debug!("Reloading playlist");
 
-        let resp = Self::parse_playlist(media_playlist_url).await?;
+        let resp = Self::parse_playlist(media_playlist_url, base_url).await?;
 
         let should_seek = {
             let mut stream_details = stream_details.write().unwrap();
@@ -218,13 +227,19 @@ impl HLSStream {
     fn spawn_reload_loop(&self) {
         let stream_details = self.stream_details.clone();
         let media_playlist = self.media_playlist_url.clone();
+        let base_url = self.base_url.clone();
         tokio::spawn(async move {
             let stream_details = stream_details.clone();
             let mut target_duration = stream_details.read().unwrap().target_duration;
             loop {
                 tokio::time::sleep(target_duration).await;
-                let resp =
-                    Self::reload_playlist(&media_playlist, stream_details.clone(), false).await;
+                let resp = Self::reload_playlist(
+                    &media_playlist,
+                    stream_details.clone(),
+                    base_url.as_ref(),
+                    false,
+                )
+                .await;
 
                 if resp.is_ok() {
                     target_duration = stream_details.read().unwrap().target_duration;

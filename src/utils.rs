@@ -28,15 +28,21 @@ pub(crate) fn is_infinite_stream(media_playlist: &MediaPlaylist) -> bool {
     media_playlist.playlist_type.unwrap_or(PlaylistType::Event) == PlaylistType::Event
 }
 
-pub(crate) fn resolve_segment_urls(media_playlist: &MediaPlaylist, base_url: &Url) -> Vec<String> {
+pub(crate) fn resolve_segment_urls(
+    media_playlist: &MediaPlaylist,
+    playlist_url: &Url,
+    base_url: Option<&Url>,
+) -> Vec<String> {
     media_playlist
         .segments
         .iter()
         .map(|(_, segment)| {
             if segment.uri().starts_with("http") {
                 segment.uri().to_string()
+            } else if let Some(base) = base_url {
+                format!("{}/{}", base, segment.uri())
             } else {
-                let base = base_url.as_str().trim_end_matches(".m3u8");
+                let base = playlist_url.as_str().trim_end_matches(".m3u8");
                 format!("{}/{}", base, segment.uri())
             }
         })
