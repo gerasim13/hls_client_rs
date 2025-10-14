@@ -299,10 +299,12 @@ impl HLSStream {
         }
 
         let mut cumulative = 0;
+        let mut segment_end = 0;
         let mut selected_index = None;
         for (i, &len) in content_lengths.iter().enumerate() {
             if start < cumulative + len {
                 selected_index = Some(i);
+                segment_end = cumulative + len;
                 break;
             }
             cumulative += len;
@@ -311,7 +313,7 @@ impl HLSStream {
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "start offset out of range"))?;
 
         let local_start = start - cumulative;
-        let local_end = end.map(|e| e - cumulative);
+        let local_end = end.map(|e| e.min(segment_end) - cumulative);
 
         let selected_url = &self.stream_details.read().unwrap().segments[idx].clone();
         #[cfg(feature = "tracing")]
@@ -343,6 +345,7 @@ impl HLSStream {
             Box::new(response.bytes_stream()) as ReqwestStream
         ));
         stream_details.current_index = idx;
+        stream_details.finished = false;
 
         Ok(())
     }
