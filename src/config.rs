@@ -70,21 +70,22 @@ impl ConfigBuilder {
     }
 
     /// Sets the URL for the configuration.
-    pub fn url<T: TryInto<Url>>(mut self, url: T) -> Result<Self, HLSDecoderError> {
-        self.url = Some(
-            url.try_into()
-                .map_err(|_| HLSDecoderError::MissingURLError)?,
-        );
+    pub fn url<T>(mut self, url: T) -> Result<Self, HLSDecoderError>
+    where
+        T: TryInto<Url>,
+        HLSDecoderError: From<T::Error>,
+    {
+        self.url = Some(url.try_into()?);
         Ok(self)
     }
 
     /// Sets base_url for the configuration.
-    pub fn base_url<T: TryInto<Url>>(mut self, base_url: T) -> Result<Self, HLSDecoderError> {
-        self.base_url = Some(
-            base_url
-                .try_into()
-                .map_err(|_| HLSDecoderError::MissingURLError)?,
-        );
+    pub fn base_url<T>(mut self, base_url: T) -> Result<Self, HLSDecoderError>
+    where
+        T: TryInto<Url>,
+        HLSDecoderError: From<T::Error>,
+    {
+        self.base_url = Some(base_url.try_into()?);
         Ok(self)
     }
 

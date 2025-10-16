@@ -23,6 +23,9 @@ pub enum HLSDecoderError {
     #[error("Failed to parse URL: {0}")]
     URLParseError(#[from] url::ParseError),
 
+    #[error("URL conversion error: {0}")]
+    URLConversionError(#[from] std::convert::Infallible),
+
     #[error("URL must be provided before building Config")]
     MissingURLError,
 
