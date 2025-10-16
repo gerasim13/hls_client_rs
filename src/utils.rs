@@ -28,19 +28,40 @@ pub(crate) fn is_infinite_stream(media_playlist: &MediaPlaylist) -> bool {
     media_playlist.playlist_type.unwrap_or(PlaylistType::Event) == PlaylistType::Event
 }
 
-pub(crate) fn resolve_segment_urls(media_playlist: &MediaPlaylist, base_url: &Url) -> Vec<String> {
-    media_playlist
-        .segments
-        .iter()
-        .map(|(_, segment)| {
-            if segment.uri().starts_with("http") {
-                segment.uri().to_string()
+pub(crate) fn resolve_segment_urls(
+    media_playlist: &MediaPlaylist,
+    playlist_url: &Url,
+    base_url: Option<&Url>,
+) -> Vec<String> {
+    let mut urls = Vec::new();
+    // Use base_url from config if present, otherwise derive from playlist URL.
+    let base = if let Some(base) = base_url {
+        base.as_str()
+    } else {
+        playlist_url.as_str().trim_end_matches(".m3u8")
+    };
+    // If the first segment has an init section, add its URI as the first URL.
+    if let Some(first_segment) = media_playlist.segments.get(0) {
+        if let Some(ref map) = first_segment.map {
+            let init_uri = map.uri();
+            let init_url = if init_uri.starts_with("http") {
+                init_uri.to_string()
             } else {
-                let base = base_url.as_str().trim_end_matches(".m3u8");
-                format!("{}/{}", base, segment.uri())
-            }
-        })
-        .collect()
+                format!("{}/{}", base, init_uri)
+            };
+            urls.push(init_url);
+        }
+    }
+    // Add all segment URIs (media segments) to the list.
+    urls.extend(media_playlist.segments.iter().map(|(_, segment)| {
+        let seg_uri = segment.uri();
+        if seg_uri.starts_with("http") {
+            seg_uri.to_string()
+        } else {
+            format!("{}/{}", base, seg_uri)
+        }
+    }));
+    urls
 }
 
 pub(crate) async fn fetch_segment_responses(segment_urls: &[String]) -> Vec<Response> {

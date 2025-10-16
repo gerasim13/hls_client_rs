@@ -8,6 +8,7 @@ use crate::errors::HLSDecoderError;
 
 pub struct Config {
     url: Url,
+    base_url: Option<Url>,
     stream_selection_cb:
         Option<Arc<Box<dyn Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync>>>,
 }
@@ -15,6 +16,7 @@ pub struct Config {
 impl Config {
     pub fn new<T>(
         url: T,
+        base_url: Option<Url>,
         stream_selection_cb: Option<
             Arc<Box<dyn Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync>>,
         >,
@@ -24,6 +26,7 @@ impl Config {
     {
         Ok(Self {
             url: url.into_url()?,
+            base_url,
             stream_selection_cb,
         })
     }
@@ -34,6 +37,10 @@ impl Config {
         self.stream_selection_cb.clone()
     }
 
+    pub(crate) fn get_base_url(&self) -> Option<Url> {
+        self.base_url.clone()
+    }
+
     pub(crate) fn get_url(&self) -> Url {
         self.url.clone()
     }
@@ -41,6 +48,7 @@ impl Config {
 
 pub struct ConfigBuilder {
     url: Option<Url>,
+    base_url: Option<Url>,
     stream_selection_cb:
         Option<Arc<Box<dyn Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync>>>,
 }
@@ -56,13 +64,28 @@ impl ConfigBuilder {
     pub fn new() -> Self {
         Self {
             url: None,
+            base_url: None,
             stream_selection_cb: None,
         }
     }
 
     /// Sets the URL for the configuration.
-    pub fn url<T: IntoUrl>(mut self, url: T) -> Result<Self, HLSDecoderError> {
-        self.url = Some(url.into_url()?);
+    pub fn url<T>(mut self, url: T) -> Result<Self, HLSDecoderError>
+    where
+        T: TryInto<Url>,
+        HLSDecoderError: From<T::Error>,
+    {
+        self.url = Some(url.try_into()?);
+        Ok(self)
+    }
+
+    /// Sets base_url for the configuration.
+    pub fn base_url<T>(mut self, base_url: T) -> Result<Self, HLSDecoderError>
+    where
+        T: TryInto<Url>,
+        HLSDecoderError: From<T::Error>,
+    {
+        self.base_url = Some(base_url.try_into()?);
         Ok(self)
     }
 
@@ -84,6 +107,7 @@ impl ConfigBuilder {
         let url = self.url.ok_or_else(|| HLSDecoderError::MissingURLError)?;
         Ok(Config {
             url,
+            base_url: self.base_url,
             stream_selection_cb: self.stream_selection_cb,
         })
     }
