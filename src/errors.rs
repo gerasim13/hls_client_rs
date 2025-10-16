@@ -25,6 +25,9 @@ pub enum HLSDecoderError {
 
     #[error("URL must be provided before building Config")]
     MissingURLError,
+
+    #[error("I/O error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 
 #[cfg(feature = "stream_download")]

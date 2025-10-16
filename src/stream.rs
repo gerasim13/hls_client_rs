@@ -42,20 +42,23 @@ pub struct HLSStream {
 impl HLSStream {
     pub async fn try_new(config: Config) -> Result<Self, HLSDecoderError> {
         let url = config.get_url();
-        let path = url.to_file_path();
-        let playlist_str = if url.scheme() == "file" && path.is_ok() {
-            if let Ok(path) = path {
-                fs::read_to_string(path).unwrap()
-            } else {
-                return Err(HLSDecoderError::MissingURLError);
+
+        let playlist_contents = match url.scheme() {
+            "file" => {
+                let path = url
+                    .to_file_path()
+                    .map_err(|_| HLSDecoderError::MissingURLError)?;
+
+                fs::read_to_string(&path).map_err(|e| HLSDecoderError::IoError(e))?
             }
-        } else {
-            let resp = reqwest::get(config.get_url()).await?;
-            resp.text().await?
+            _ => {
+                let resp = reqwest::get(url).await.map_err(HLSDecoderError::from)?;
+                resp.text().await.map_err(HLSDecoderError::from)?
+            }
         };
 
         let playlist = if let Some(media_playlist) = Self::handle_master_playlist(
-            playlist_str.as_str(),
+            &playlist_contents,
             config.get_url().as_str(),
             config.get_base_url(),
             config.get_stream_selection_cb(),
@@ -393,7 +396,7 @@ impl Stream for HLSStream {
         // Mark as finished if we've exhausted all streams
         // This doesn't always mean that the stream has ended. In case of infinite streams, we just have to wait for a playlist refresh
         this.stream_details.write().unwrap().finished = true;
-        return std::task::Poll::Pending;
+        return res;
     }
 }
 
