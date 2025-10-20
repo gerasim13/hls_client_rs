@@ -1,47 +1,38 @@
-use std::{
-    fs, io,
-    pin::Pin,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{fs, io, pin::Pin, sync::Arc, time::Duration};
 
 use futures::Stream;
 use hls_m3u8::{tags::VariantStream, MasterPlaylist, MediaPlaylist};
-use reqwest::{header::HeaderMap, IntoUrl, Url};
+use reqwest::{Client, Url};
+use tokio::sync::RwLock;
+
+#[cfg(feature = "aes-encryption")]
+use {crate::config::KeyProcessorCallback, std::collections::HashMap};
 
 use crate::{
-    config::Config,
+    config::{Config, VariantStreamSelector},
     errors::HLSDecoderError,
-    utils::{
-        build_streams, compute_content_lengths, compute_overall_content_length,
-        extract_content_type, extract_headers, fetch_playlist, fetch_segment_responses,
-        is_infinite_stream, parse_media_playlist, resolve_segment_urls, ReqwestStream,
-        ReqwestStreamItem,
-    },
+    segment::{resolve_segments, SeekResult, SegmentList},
+    utils::{fetch_playlist, is_infinite_stream, parse_media_playlist, ReqwestStreamItem},
 };
 
 pub(crate) struct StreamDetails {
     media_playlist: MediaPlaylist<'static>,
-    content_length: Option<u64>,
-    content_type: Option<String>,
-    headers: Vec<HeaderMap>,
-    segments: Vec<String>,
-    content_lengths: Vec<u64>,
-    streams: Vec<Arc<RwLock<ReqwestStream>>>,
+    segments: SegmentList,
     current_index: usize,
     target_duration: Duration,
     finished: bool,
 }
 
 pub struct HLSStream {
-    pub(crate) media_playlist_url: Url,
-    pub(crate) base_url: Option<Url>,
+    pub(crate) config: Arc<Box<Config>>,
     pub(crate) stream_details: Arc<RwLock<StreamDetails>>,
+    pub(crate) media_playlist_url: Url,
 }
 
 impl HLSStream {
     pub async fn try_new(config: Config) -> Result<Self, HLSDecoderError> {
         let url = config.get_url();
+        let client = Client::new();
 
         let playlist_contents = match url.scheme() {
             "file" => {
@@ -52,7 +43,11 @@ impl HLSStream {
                 fs::read_to_string(&path).map_err(|e| HLSDecoderError::IoError(e))?
             }
             _ => {
-                let resp = reqwest::get(url).await.map_err(HLSDecoderError::from)?;
+                let resp = client
+                    .get(url)
+                    .send()
+                    .await
+                    .map_err(HLSDecoderError::from)?;
                 resp.text().await.map_err(HLSDecoderError::from)?
             }
         };
@@ -70,17 +65,30 @@ impl HLSStream {
             config.get_url().as_str().to_string()
         };
 
-        let resp = Self::parse_playlist(&playlist.parse()?, config.get_base_url().as_ref()).await?;
-        let stream_details = Arc::new(RwLock::new(resp));
+        #[cfg(feature = "aes-encryption")]
+        let details = Self::parse_playlist(
+            client,
+            &playlist.parse()?,
+            config.get_base_url().as_ref(),
+            config.get_key_query_params(),
+            config.get_key_request_headers(),
+            config.get_key_processor_cb(),
+        )
+        .await?;
 
+        #[cfg(not(feature = "aes-encryption"))]
+        let details =
+            Self::parse_playlist(client, &playlist.parse()?, config.get_base_url().as_ref())
+                .await?;
+
+        let content_length = details.segments.content_length();
         let ret = Self {
             media_playlist_url: playlist.parse()?,
-            base_url: config.get_base_url(),
-            stream_details,
+            config: Arc::new(Box::new(config)),
+            stream_details: Arc::new(RwLock::new(details)),
         };
 
-        // Reload playlist only for infinite streams
-        if ret.content_length().is_none() {
+        if content_length.is_none() {
             ret.spawn_reload_loop();
         }
 
@@ -91,11 +99,9 @@ impl HLSStream {
         playlist: &str,
         src: &str,
         base_url: Option<Url>,
-        stream_selection_cb: Option<
-            Arc<Box<dyn Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync>>,
-        >,
+        stream_selection_cb: Option<Arc<Box<VariantStreamSelector>>>,
     ) -> Result<Option<String>, HLSDecoderError> {
-        if let Ok(master_playlist) = hls_m3u8::MasterPlaylist::try_from(playlist) {
+        if let Ok(master_playlist) = MasterPlaylist::try_from(playlist) {
             #[cfg(feature = "tracing")]
             tracing::info!("Master playlist detected");
 
@@ -128,55 +134,70 @@ impl HLSStream {
         Ok(None)
     }
 
+    #[cfg(not(feature = "aes-encryption"))]
     async fn parse_playlist(
+        client: Client,
         media_playlist_url: &Url,
         base_url: Option<&Url>,
     ) -> Result<StreamDetails, HLSDecoderError> {
         let playlist_text = fetch_playlist(media_playlist_url).await?;
         let media_playlist = parse_media_playlist(&playlist_text).await?.into_owned();
-        let is_infinite_stream = is_infinite_stream(&media_playlist);
-        let segment_urls = resolve_segment_urls(&media_playlist, media_playlist_url, base_url);
-        let segment_responses = fetch_segment_responses(&segment_urls).await;
-        let content_lengths = compute_content_lengths(&segment_responses);
-        let content_length = if is_infinite_stream {
-            None
-        } else {
-            compute_overall_content_length(&segment_responses)
-        };
-        let content_type = extract_content_type(segment_responses.first());
-        let headers = extract_headers(&segment_responses);
-        let streams = build_streams(segment_responses);
+        let segments =
+            resolve_segments(client, &media_playlist, media_playlist_url, base_url).await?;
+        let target_duration = media_playlist.target_duration;
 
         Ok(StreamDetails {
-            content_length,
-            content_type,
-            headers,
-            segments: segment_urls,
-            content_lengths,
-            streams,
-            target_duration: media_playlist.target_duration,
-            current_index: 0,
-            finished: false,
+            segments,
             media_playlist,
+            target_duration,
+            finished: false,
+            current_index: 0,
         })
     }
 
-    pub(crate) async fn reload_playlist(
+    #[cfg(feature = "aes-encryption")]
+    async fn parse_playlist(
+        client: Client,
         media_playlist_url: &Url,
-        stream_details: Arc<RwLock<StreamDetails>>,
         base_url: Option<&Url>,
+        key_query_params: Option<HashMap<String, String>>,
+        key_request_headers: Option<HashMap<String, String>>,
+        key_processor_cb: Option<Arc<Box<KeyProcessorCallback>>>,
+    ) -> Result<StreamDetails, HLSDecoderError> {
+        let playlist_text = fetch_playlist(media_playlist_url).await?;
+        let media_playlist = parse_media_playlist(&playlist_text).await?.into_owned();
+        let segments = resolve_segments(
+            client,
+            &media_playlist,
+            media_playlist_url,
+            base_url,
+            key_query_params,
+            key_request_headers,
+            key_processor_cb,
+        )
+        .await?;
+        let target_duration = media_playlist.target_duration;
+
+        Ok(StreamDetails {
+            segments,
+            media_playlist,
+            target_duration,
+            finished: false,
+            current_index: 0,
+        })
+    }
+
+    async fn update_stream_details(
+        new_details: StreamDetails,
+        old_stream_details: Arc<RwLock<StreamDetails>>,
         reconnect: bool,
     ) -> Result<bool, HLSDecoderError> {
         #[cfg(feature = "tracing")]
         tracing::debug!("Reloading playlist");
-
-        let resp = Self::parse_playlist(media_playlist_url, base_url).await?;
-
         let should_seek = {
-            let mut stream_details = stream_details.write().unwrap();
+            let mut stream_details = old_stream_details.write().await;
             let old_index = stream_details.current_index;
-            let old_active_stream = stream_details.streams.get(old_index).cloned();
-            let old_url = if stream_details.finished {
+            let old_seg = if stream_details.finished {
                 None
             } else {
                 stream_details.segments.get(old_index).cloned()
@@ -184,20 +205,19 @@ impl HLSStream {
 
             #[cfg(feature = "tracing")]
             tracing::debug!(
-                "old_url: {:?}, old_index: {}, newsegments: {:?}",
-                old_url,
+                "old_seg: {:?}, old_index: {}, newsegments: {:?}",
+                old_seg,
                 old_index,
                 stream_details.segments
             );
 
-            *stream_details = resp;
+            *stream_details = new_details;
 
             // Find the old URL in the new segments list to maintain playback position
-            let (new_current_index, should_seek) = match old_url.as_ref() {
-                Some(url) => stream_details
+            let (new_current_index, should_seek) = match old_seg.as_ref() {
+                Some(seg) => stream_details
                     .segments
-                    .iter()
-                    .position(|segment_url| segment_url == url)
+                    .find_segment(seg.read().await.uri.clone())
                     .map_or((0, false), |idx| (idx, true)),
                 None => (0, false),
             };
@@ -207,16 +227,15 @@ impl HLSStream {
 
             // If we don't need to reconnect, restore the old stream which was ongoing so we have continuity
             if should_seek && !reconnect {
-                if let Some(old_active_stream) = old_active_stream {
-                    let item = stream_details
-                        .streams
-                        .get_mut(new_current_index)
-                        .expect("Stream should exist");
+                let new_segment = stream_details
+                    .segments
+                    .get_mut(new_current_index)
+                    .expect("Segment should exist");
 
+                if let Some(old_active_segment) = old_seg {
                     #[cfg(feature = "tracing")]
                     tracing::debug!("Restoring old stream at index {}", new_current_index);
-                    *item = old_active_stream;
-
+                    *new_segment = old_active_segment;
                     // No need to seek if we're replacing the old active stream
                     return Ok(false);
                 }
@@ -227,15 +246,72 @@ impl HLSStream {
         Ok(should_seek)
     }
 
+    #[cfg(not(feature = "aes-encryption"))]
+    pub(crate) async fn reload_playlist(
+        media_playlist_url: &Url,
+        stream_details: Arc<RwLock<StreamDetails>>,
+        base_url: Option<&Url>,
+        reconnect: bool,
+    ) -> Result<bool, HLSDecoderError> {
+        let client = Client::new();
+        let new_details = Self::parse_playlist(client, media_playlist_url, base_url).await?;
+        Self::update_stream_details(new_details, stream_details, reconnect).await
+    }
+
+    #[cfg(feature = "aes-encryption")]
+    pub(crate) async fn reload_playlist(
+        media_playlist_url: &Url,
+        stream_details: Arc<RwLock<StreamDetails>>,
+        base_url: Option<&Url>,
+        key_query_params: Option<HashMap<String, String>>,
+        key_request_headers: Option<HashMap<String, String>>,
+        key_processor_cb: Option<Arc<Box<KeyProcessorCallback>>>,
+        reconnect: bool,
+    ) -> Result<bool, HLSDecoderError> {
+        let client = Client::new();
+        let new_details = Self::parse_playlist(
+            client,
+            media_playlist_url,
+            base_url,
+            key_query_params,
+            key_request_headers,
+            key_processor_cb,
+        )
+        .await?;
+        Self::update_stream_details(new_details, stream_details, reconnect).await
+    }
+
     fn spawn_reload_loop(&self) {
         let stream_details = self.stream_details.clone();
         let media_playlist = self.media_playlist_url.clone();
-        let base_url = self.base_url.clone();
+        let base_url = self.config.get_base_url();
+
+        #[cfg(feature = "aes-encryption")]
+        let key_processor_cb = self.config.get_key_processor_cb();
+        #[cfg(feature = "aes-encryption")]
+        let key_query_params = self.config.get_key_query_params();
+        #[cfg(feature = "aes-encryption")]
+        let key_request_headers = self.config.get_key_request_headers();
+
         tokio::spawn(async move {
             let stream_details = stream_details.clone();
-            let mut target_duration = stream_details.read().unwrap().target_duration;
+            let mut target_duration = stream_details.read().await.target_duration;
             loop {
                 tokio::time::sleep(target_duration).await;
+
+                #[cfg(feature = "aes-encryption")]
+                let resp = Self::reload_playlist(
+                    &media_playlist,
+                    stream_details.clone(),
+                    base_url.as_ref(),
+                    key_query_params.clone(),
+                    key_request_headers.clone(),
+                    key_processor_cb.clone(),
+                    false,
+                )
+                .await;
+
+                #[cfg(not(feature = "aes-encryption"))]
                 let resp = Self::reload_playlist(
                     &media_playlist,
                     stream_details.clone(),
@@ -245,7 +321,7 @@ impl HLSStream {
                 .await;
 
                 if resp.is_ok() {
-                    target_duration = stream_details.read().unwrap().target_duration;
+                    target_duration = stream_details.read().await.target_duration;
                 } else {
                     break;
                 }
@@ -253,108 +329,71 @@ impl HLSStream {
         });
     }
 
-    pub fn content_type(&self) -> Option<String> {
-        self.stream_details.read().unwrap().content_type.clone()
+    pub(crate) fn content_length(&self) -> Option<u64> {
+        match self.stream_details.try_read() {
+            Ok(guard) => {
+                let is_infinite_stream = is_infinite_stream(&guard.media_playlist);
+                if is_infinite_stream {
+                    None
+                } else {
+                    guard.segments.content_length()
+                }
+            }
+            Err(_) => None,
+        }
     }
 
-    pub fn headers(&self) -> Vec<HeaderMap> {
-        self.stream_details.read().unwrap().headers.clone()
-    }
-
-    pub(crate) fn supports_range_request(&self) -> bool {
-        self.headers()
-            .iter()
-            .all(|res| res.contains_key("Accept-Ranges"))
-    }
-
-    pub fn get_media_playlist(&self) -> MediaPlaylist<'static> {
-        return self.stream_details.read().unwrap().media_playlist.clone();
-    }
-
-    async fn new_req_with_range(
-        url: impl IntoUrl,
-        start: u64,
-        end: Option<u64>,
-    ) -> Result<reqwest::Response, HLSDecoderError> {
-        let client = reqwest::Client::new();
-        Ok(client
-            .get(url)
-            .header(RANGE_HEADER_KEY, format_range_header_bytes(start, end))
-            .send()
-            .await?)
+    pub(crate) async fn supports_range_request(&self) -> bool {
+        self.stream_details
+            .read()
+            .await
+            .segments
+            .supports_range_request()
+            .is_some_and(|supports_range_request| supports_range_request)
     }
 
     pub async fn handle_seek(&mut self, start: u64, end: Option<u64>) -> io::Result<()> {
-        let content_lengths = self.stream_details.read().unwrap().content_lengths.clone();
-        let total_length: u64 = content_lengths.iter().sum();
-        if start == total_length && total_length != 0 {
-            #[cfg(feature = "tracing")]
-            tracing::trace!("seek position is at total length; setting stream to empty");
-            let mut stream_details = self.stream_details.write().unwrap();
-            stream_details.current_index = 0;
-            stream_details.finished = true;
-            return Ok(());
-        }
-
-        if !self.supports_range_request() {
-            #[cfg(feature = "tracing")]
-            tracing::warn!("Accept-Ranges header not present. Attempting seek anyway.");
-        }
-
-        let mut cumulative = 0;
-        let mut segment_end = 0;
-        let mut selected_index = None;
-        for (i, &len) in content_lengths.iter().enumerate() {
-            if start < cumulative + len {
-                selected_index = Some(i);
-                segment_end = cumulative + len;
-                break;
+        let seek_result = self
+            .stream_details
+            .read()
+            .await
+            .segments
+            .seek_segment(start, end);
+        match seek_result {
+            SeekResult::EndOfStream => {
+                #[cfg(feature = "tracing")]
+                tracing::trace!("seek position is at total length; setting stream to empty");
+                let mut stream_details = self.stream_details.write().await;
+                stream_details.current_index = 0;
+                stream_details.finished = true;
+                Ok(())
             }
-            cumulative += len;
+            SeekResult::OutOfBounds => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "start offset out of range",
+            )),
+            SeekResult::Located {
+                index,
+                local_start,
+                local_end,
+            } => {
+                #[cfg(feature = "tracing")]
+                if !self.supports_range_request().await {
+                    tracing::warn!("Accept-Ranges header not present. Attempting seek anyway.");
+                }
+                let mut stream_details = self.stream_details.write().await;
+                if let Some(selected_segment) = stream_details.segments.get(index).cloned() {
+                    selected_segment
+                        .write()
+                        .await
+                        .reconnect(local_start, local_end)
+                        .await?;
+                }
+                stream_details.current_index = index;
+                stream_details.finished = false;
+                Ok(())
+            }
         }
-        let idx = selected_index
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "start offset out of range"))?;
-
-        let local_start = start - cumulative;
-        let local_end = end.map(|e| e.min(segment_end) - cumulative);
-
-        let selected_url = &self.stream_details.read().unwrap().segments[idx].clone();
-        #[cfg(feature = "tracing")]
-        tracing::trace!(
-            "sending HTTP range request to {} (local offset: {}, local end: {:?})",
-            selected_url,
-            local_start,
-            local_end
-        );
-
-        #[cfg(feature = "tracing")]
-        let request_start = std::time::Instant::now();
-        let response = Self::new_req_with_range(
-            selected_url,
-            local_start,
-            local_end.map(|le| le.saturating_sub(1)),
-        )
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        #[cfg(feature = "tracing")]
-        tracing::trace!(
-            "HTTP range request finished in {:?}",
-            request_start.elapsed()
-        );
-
-        // Replace the stream for the selected segment with the new one.
-        let mut stream_details = self.stream_details.write().unwrap();
-        stream_details.streams[idx] = Arc::new(RwLock::new(
-            Box::new(response.bytes_stream()) as ReqwestStream
-        ));
-        stream_details.current_index = idx;
-        stream_details.finished = false;
-
-        Ok(())
-    }
-
-    pub fn content_length(&self) -> Option<u64> {
-        self.stream_details.read().unwrap().content_length
     }
 }
 
@@ -367,36 +406,71 @@ impl Stream for HLSStream {
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
 
-        let mut stream_details = this.stream_details.read().unwrap();
+        loop {
+            let stream_details = match this.stream_details.try_read() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    // Lock is currently held for writing, so we can't proceed.
+                    // We return Pending and the runtime will poll us again later.
+                    return std::task::Poll::Pending;
+                }
+            };
 
-        // Check if we're already finished
-        if stream_details.finished {
-            return get_finished_poll_result(&stream_details);
-        }
-
-        // Process current streams
-        while stream_details.current_index < stream_details.streams.len() {
-            if let Some(poll_result) = poll_current_stream(&mut stream_details, cx) {
-                return poll_result;
+            // Check if we're already finished
+            if stream_details.finished {
+                return get_finished_poll_result(&stream_details);
             }
 
-            // Move to next stream
-            drop(stream_details);
-            this.stream_details.write().unwrap().current_index += 1;
-            stream_details = this.stream_details.read().unwrap();
+            // Check if we've finished all available segments.
+            if stream_details.current_index >= stream_details.segments.len() {
+                // Release the read lock so we can get a write lock.
+                drop(stream_details);
+
+                // Get a write lock to mark the stream as finished.
+                let mut write_guard = match this.stream_details.try_write() {
+                    Ok(guard) => guard,
+                    Err(_) => return std::task::Poll::Pending, // Can't get write lock, try later.
+                };
+
+                write_guard.finished = true;
+                return get_finished_poll_result(&write_guard);
+            }
+
+            // Poll the stream of the current segment.
+            match stream_details
+                .segments
+                .poll_stream(cx, stream_details.current_index)
+            {
+                Some(std::task::Poll::Ready(Some(item))) => {
+                    // We got data from the current segment. Return it.
+                    return std::task::Poll::Ready(Some(item));
+                }
+                Some(std::task::Poll::Pending) => {
+                    // The underlying segment stream is waiting on I/O.
+                    // Propagate the Pending state.
+                    return std::task::Poll::Pending;
+                }
+                Some(std::task::Poll::Ready(None)) | None => {
+                    // The current segment has finished. We need to advance the index.
+                    // First, release the read lock.
+                    drop(stream_details);
+
+                    // Now, acquire a write lock to increment the index.
+                    let mut write_guard = match this.stream_details.try_write() {
+                        Ok(guard) => guard,
+                        Err(_) => return std::task::Poll::Pending, // Try again later.
+                    };
+
+                    if write_guard.current_index < write_guard.segments.len() {
+                        write_guard.current_index += 1;
+                    }
+
+                    // Instead of returning, we `continue` the loop to immediately
+                    // try polling the *next* segment in the same poll cycle.
+                    continue;
+                }
+            }
         }
-
-        #[cfg(feature = "tracing")]
-        tracing::trace!("Finished all streams, ending stream if finite");
-
-        // After the loop ends, stream_details will always be locked by the last iteration
-        let res = get_finished_poll_result(&stream_details);
-        drop(stream_details);
-
-        // Mark as finished if we've exhausted all streams
-        // This doesn't always mean that the stream has ended. In case of infinite streams, we just have to wait for a playlist refresh
-        this.stream_details.write().unwrap().finished = true;
-        return res;
     }
 }
 
@@ -404,46 +478,13 @@ fn get_finished_poll_result(
     stream_details: &StreamDetails,
 ) -> std::task::Poll<Option<ReqwestStreamItem>> {
     // If the stream is infinite, always return pending. Otherwise tell the reader that we've exhausted the streams
-    if stream_details.content_length.is_none_or(|c| c == 0) {
+    if stream_details
+        .segments
+        .content_length()
+        .is_none_or(|c| c == 0)
+    {
         std::task::Poll::Pending
     } else {
         std::task::Poll::Ready(None)
     }
-}
-
-fn poll_current_stream(
-    stream_details: &mut std::sync::RwLockReadGuard<'_, StreamDetails>,
-    cx: &mut std::task::Context<'_>,
-) -> Option<std::task::Poll<Option<ReqwestStreamItem>>> {
-    let idx = stream_details.current_index;
-    let stream_arc = &stream_details.streams[idx];
-
-    if let Ok(mut guard) = stream_arc.try_write() {
-        let pinned_stream = Pin::new(&mut *guard);
-        match pinned_stream.poll_next(cx) {
-            std::task::Poll::Ready(Some(item)) => Some(std::task::Poll::Ready(Some(item))),
-            std::task::Poll::Ready(None) => {
-                // Move to the next stream if the current one is exhausted
-                None
-            }
-            std::task::Poll::Pending => Some(std::task::Poll::Pending),
-        }
-    } else {
-        // Unable to acquire the lock immediately, so yield Pending.
-        Some(std::task::Poll::Pending)
-    }
-}
-
-/// Reference: https://github.com/aschey/stream-download-rs/blob/74bd011587b2a4f67c12f870f92ca8368991ec99/src/http/mod.rs#L363C1-L374C2
-/// HTTP range header key
-pub const RANGE_HEADER_KEY: &str = "Range";
-
-/// Utility function to format a range header for requesting bytes.
-///
-/// ex: `bytes=200-400`
-pub fn format_range_header_bytes(start: u64, end: Option<u64>) -> String {
-    format!(
-        "bytes={start}-{}",
-        end.map(|e| e.to_string()).unwrap_or_default()
-    )
 }

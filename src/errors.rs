@@ -31,6 +31,19 @@ pub enum HLSDecoderError {
 
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
+
+    /// A general-purpose error for miscellaneous issues.
+    #[error("{0}")]
+    Other(String),
+}
+
+#[derive(Error, Debug)]
+pub enum StreamItemError {
+    #[error("Network error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+
+    #[error("Decryption error: {0}")]
+    Decryption(String),
 }
 
 #[cfg(feature = "stream_download")]

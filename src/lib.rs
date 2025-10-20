@@ -4,6 +4,7 @@ pub mod config;
 #[cfg(feature = "blocking")]
 pub mod decoder;
 pub mod errors;
+pub mod segment;
 pub mod stream;
 mod utils;
 

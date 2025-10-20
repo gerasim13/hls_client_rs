@@ -10,33 +10,36 @@ description = "Library to generate a single stream from HLS segments"
 repository = "https://github.com/Ovenoboyo/hls_client_rs"
 
 [dependencies]
+block-modes = "0.9.1"
 bytes = "1.10.1"
-futures = { version = "0.3.31", default-features = false }
+hex = "0.4.3"
 hls_m3u8 = "0.5.1"
+thiserror = "2.0.17"
+url = "2.5.7"
+futures = { version = "0.3.31", default-features = false }
 mediatype = { version = "0.20.0", default-features = false }
-reqwest = { version = "0.12.20", features = [
-  "stream",
-], default-features = false, optional = true }
-stream-download = { version = "0.22.6", optional = true, default-features = false }
-thiserror = "2.0.12"
+reqwest = { version = "0.12.24", features = [ "stream" ], default-features = false, optional = true }
+stream-download = { version = "0.22.7", optional = true, default-features = false }
+tokio = { version = "1.48.0", default-features = false }
 tracing = { version = "0.1.41", optional = true }
-url = "2.5.4"
-tokio = { version = "1.45.1", default-features = false }
+aes = { version = "0.8.4", optional = true }
+cbc = { version = "0.1.2", optional = true }
 
 [dev-dependencies]
-rodio = "0.20.1"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+rodio = "0.21.1"
 stream-download = "0.22.7"
-tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread"] }
-libmpv2 = "4.1.0"
+libmpv2 = "5.0.1"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
 
 [features]
-default = ["blocking", "reqwest-native-tls", "stream_download"]
+aes-encryption = ["dep:aes", "dep:cbc"]
 blocking = ["futures/executor"]
-stream_download = ["dep:stream-download"]
-tracing = ["dep:tracing"]
+default = ["blocking", "reqwest-native-tls", "stream_download"]
 reqwest-native-tls = ["reqwest", "reqwest/native-tls"]
 reqwest-rustls = ["reqwest", "reqwest/rustls-tls"]
+stream_download = ["dep:stream-download"]
+tracing = ["dep:tracing"]
 
 [[example]]
 name = "blocking"
