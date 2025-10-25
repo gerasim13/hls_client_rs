@@ -22,25 +22,27 @@ pub fn format_range_header_bytes(start: u64, end: Option<u64>) -> String {
     )
 }
 
-pub(crate) async fn fetch_playlist(url: &Url) -> Result<String, HLSDecoderError> {
-    let response = reqwest::get(url.as_str()).await?;
-    let text = response.text().await?;
-    Ok(text)
-}
-
-pub(crate) async fn parse_media_playlist(
-    playlist_text: &str,
-) -> Result<MediaPlaylist, HLSDecoderError> {
-    handle_media_playlist(playlist_text).await
+pub(crate) fn get_segment_uri(uri: &str, base_url: &str) -> String {
+    if uri.starts_with("http") {
+        uri.to_string()
+    } else {
+        format!("{}/{}", base_url, uri)
+    }
 }
 
 pub(crate) fn is_infinite_stream(media_playlist: &MediaPlaylist) -> bool {
     media_playlist.playlist_type.unwrap_or(PlaylistType::Event) == PlaylistType::Event
 }
 
-pub(crate) async fn handle_media_playlist(
+pub(crate) async fn fetch_playlist(url: &Url) -> Result<String, HLSDecoderError> {
+    let response = reqwest::get(url.as_str()).await?;
+    let text = response.text().await?;
+    Ok(text)
+}
+
+pub(crate) fn parse_media_playlist(
     playlist: &str,
-) -> Result<MediaPlaylist, HLSDecoderError> {
+) -> Result<MediaPlaylist<'static>, HLSDecoderError> {
     let playlist = MediaPlaylist::try_from(playlist)?.into_owned();
 
     #[cfg(feature = "tracing")]

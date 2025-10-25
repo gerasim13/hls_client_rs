@@ -1,31 +1,24 @@
 use std::sync::Arc;
 
+#[cfg(feature = "aes-encryption")]
 use bytes::Bytes;
 use hls_m3u8::{tags::VariantStream, MasterPlaylist};
 use reqwest::IntoUrl;
 use url::Url;
 
 #[cfg(feature = "aes-encryption")]
-use std::collections::HashMap;
-
+use crate::aes::{AesConfig, KeyProcessorCallback, KeyQueryParams, KeyRequestHeaders};
 use crate::errors::HLSDecoderError;
 
 // Type alias for the variant stream selector callback
 pub type VariantStreamSelector = dyn Fn(MasterPlaylist) -> Option<VariantStream> + Send + Sync;
-// Callback for transforming or decrypting HLS AES-128 keys.
-// This can be used for in-house DRM, key wrapping, or custom modifications.
-pub type KeyProcessorCallback = dyn Fn(Bytes) -> Bytes + Send + Sync;
 
 pub struct Config {
     url: Url,
     base_url: Option<Url>,
     stream_selection_cb: Option<Arc<Box<VariantStreamSelector>>>,
     #[cfg(feature = "aes-encryption")]
-    key_processor_cb: Option<Arc<Box<KeyProcessorCallback>>>,
-    #[cfg(feature = "aes-encryption")]
-    key_query_params: Option<HashMap<String, String>>,
-    #[cfg(feature = "aes-encryption")]
-    key_request_headers: Option<HashMap<String, String>>,
+    pub(crate) aes_config: Option<AesConfig>,
 }
 
 impl Config {
@@ -33,9 +26,7 @@ impl Config {
         url: T,
         base_url: Option<Url>,
         stream_selection_cb: Option<Arc<Box<VariantStreamSelector>>>,
-        #[cfg(feature = "aes-encryption")] key_processor_cb: Option<Arc<Box<KeyProcessorCallback>>>,
-        #[cfg(feature = "aes-encryption")] key_query_params: Option<HashMap<String, String>>,
-        #[cfg(feature = "aes-encryption")] key_request_headers: Option<HashMap<String, String>>,
+        #[cfg(feature = "aes-encryption")] aes_config: Option<AesConfig>,
     ) -> Result<Self, HLSDecoderError>
     where
         T: IntoUrl,
@@ -45,11 +36,7 @@ impl Config {
             base_url,
             stream_selection_cb,
             #[cfg(feature = "aes-encryption")]
-            key_processor_cb,
-            #[cfg(feature = "aes-encryption")]
-            key_query_params,
-            #[cfg(feature = "aes-encryption")]
-            key_request_headers,
+            aes_config,
         })
     }
 
@@ -67,52 +54,39 @@ impl Config {
 
     #[cfg(feature = "aes-encryption")]
     pub(crate) fn get_key_processor_cb(&self) -> Option<Arc<Box<KeyProcessorCallback>>> {
-        self.key_processor_cb.clone()
+        self.aes_config
+            .as_ref()
+            .and_then(|config| config.key_processor_cb.clone())
     }
 
     #[cfg(feature = "aes-encryption")]
-    pub(crate) fn get_key_query_params(&self) -> Option<HashMap<String, String>> {
-        self.key_query_params.clone()
+    pub(crate) fn get_key_query_params(&self) -> Option<KeyQueryParams> {
+        self.aes_config
+            .as_ref()
+            .and_then(|config| config.key_query_params.clone())
     }
 
     #[cfg(feature = "aes-encryption")]
-    pub(crate) fn get_key_request_headers(&self) -> Option<HashMap<String, String>> {
-        self.key_request_headers.clone()
+    pub(crate) fn get_key_request_headers(&self) -> Option<KeyRequestHeaders> {
+        self.aes_config
+            .as_ref()
+            .and_then(|config| config.key_request_headers.clone())
     }
 }
 
+#[derive(Default)]
 pub struct ConfigBuilder {
     url: Option<Url>,
     base_url: Option<Url>,
     stream_selection_cb: Option<Arc<Box<VariantStreamSelector>>>,
     #[cfg(feature = "aes-encryption")]
-    key_processor_cb: Option<Arc<Box<KeyProcessorCallback>>>,
-    #[cfg(feature = "aes-encryption")]
-    key_query_params: Option<HashMap<String, String>>,
-    #[cfg(feature = "aes-encryption")]
-    key_request_headers: Option<HashMap<String, String>>,
-}
-
-impl Default for ConfigBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub(crate) aes_config: Option<AesConfig>,
 }
 
 impl ConfigBuilder {
     /// Creates a new builder with no URL and no callback set.
     pub fn new() -> Self {
-        Self {
-            url: None,
-            base_url: None,
-            stream_selection_cb: None,
-            #[cfg(feature = "aes-encryption")]
-            key_processor_cb: None,
-            #[cfg(feature = "aes-encryption")]
-            key_query_params: None,
-            #[cfg(feature = "aes-encryption")]
-            key_request_headers: None,
-        }
+        Self::default()
     }
 
     /// Sets the URL for the configuration.
@@ -144,24 +118,30 @@ impl ConfigBuilder {
         self
     }
 
+    /// Gets mutable reference to AES configuration.
+    #[cfg(feature = "aes-encryption")]
+    fn aes_config_mut(&mut self) -> &mut AesConfig {
+        self.aes_config.get_or_insert_with(Default::default)
+    }
+
     /// Sets the decryption callback.
     #[cfg(feature = "aes-encryption")]
     pub fn key_processor_cb(mut self, cb: impl Fn(Bytes) -> Bytes + Send + Sync + 'static) -> Self {
-        self.key_processor_cb = Some(Arc::new(Box::new(cb)));
+        self.aes_config_mut().key_processor_cb = Some(Arc::new(Box::new(cb)));
         self
     }
 
     /// Sets the key query parameters.
     #[cfg(feature = "aes-encryption")]
-    pub fn key_query_params(mut self, params: HashMap<String, String>) -> Self {
-        self.key_query_params = Some(params);
+    pub fn key_query_params(mut self, params: KeyQueryParams) -> Self {
+        self.aes_config_mut().key_query_params = Some(params);
         self
     }
 
     /// Sets custom headers for key server requests.
     #[cfg(feature = "aes-encryption")]
-    pub fn key_request_headers(mut self, headers: HashMap<String, String>) -> Self {
-        self.key_request_headers = Some(headers);
+    pub fn key_request_headers(mut self, headers: KeyRequestHeaders) -> Self {
+        self.aes_config_mut().key_request_headers = Some(headers);
         self
     }
 
@@ -177,11 +157,7 @@ impl ConfigBuilder {
             base_url: self.base_url,
             stream_selection_cb: self.stream_selection_cb,
             #[cfg(feature = "aes-encryption")]
-            key_processor_cb: self.key_processor_cb,
-            #[cfg(feature = "aes-encryption")]
-            key_query_params: self.key_query_params,
-            #[cfg(feature = "aes-encryption")]
-            key_request_headers: self.key_request_headers,
+            aes_config: self.aes_config,
         })
     }
 }

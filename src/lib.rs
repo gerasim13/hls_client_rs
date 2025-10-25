@@ -1,5 +1,7 @@
 #![doc = include_str!("../README.md")]
 
+#[cfg(feature = "aes-encryption")]
+pub mod aes;
 pub mod config;
 #[cfg(feature = "blocking")]
 pub mod decoder;

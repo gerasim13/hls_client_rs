@@ -5,13 +5,10 @@ use hls_m3u8::{tags::VariantStream, MasterPlaylist, MediaPlaylist};
 use reqwest::{Client, Url};
 use tokio::sync::RwLock;
 
-#[cfg(feature = "aes-encryption")]
-use {crate::config::KeyProcessorCallback, std::collections::HashMap};
-
 use crate::{
     config::{Config, VariantStreamSelector},
     errors::HLSDecoderError,
-    segment::{resolve_segments, SeekResult, SegmentList},
+    segment::{SeekResult, SegmentList, SegmentResolver},
     utils::{fetch_playlist, is_infinite_stream, parse_media_playlist, ReqwestStreamItem},
 };
 
@@ -65,21 +62,7 @@ impl HLSStream {
             config.get_url().as_str().to_string()
         };
 
-        #[cfg(feature = "aes-encryption")]
-        let details = Self::parse_playlist(
-            client,
-            &playlist.parse()?,
-            config.get_base_url().as_ref(),
-            config.get_key_query_params(),
-            config.get_key_request_headers(),
-            config.get_key_processor_cb(),
-        )
-        .await?;
-
-        #[cfg(not(feature = "aes-encryption"))]
-        let details =
-            Self::parse_playlist(client, &playlist.parse()?, config.get_base_url().as_ref())
-                .await?;
+        let details = Self::parse_playlist(client, &config, &playlist.parse()?).await?;
 
         let content_length = details.segments.content_length();
         let ret = Self {
@@ -134,48 +117,16 @@ impl HLSStream {
         Ok(None)
     }
 
-    #[cfg(not(feature = "aes-encryption"))]
     async fn parse_playlist(
         client: Client,
+        config: &Config,
         media_playlist_url: &Url,
-        base_url: Option<&Url>,
     ) -> Result<StreamDetails, HLSDecoderError> {
         let playlist_text = fetch_playlist(media_playlist_url).await?;
-        let media_playlist = parse_media_playlist(&playlist_text).await?.into_owned();
+        let media_playlist = parse_media_playlist(&playlist_text)?.into_owned();
         let segments =
-            resolve_segments(client, &media_playlist, media_playlist_url, base_url).await?;
-        let target_duration = media_playlist.target_duration;
-
-        Ok(StreamDetails {
-            segments,
-            media_playlist,
-            target_duration,
-            finished: false,
-            current_index: 0,
-        })
-    }
-
-    #[cfg(feature = "aes-encryption")]
-    async fn parse_playlist(
-        client: Client,
-        media_playlist_url: &Url,
-        base_url: Option<&Url>,
-        key_query_params: Option<HashMap<String, String>>,
-        key_request_headers: Option<HashMap<String, String>>,
-        key_processor_cb: Option<Arc<Box<KeyProcessorCallback>>>,
-    ) -> Result<StreamDetails, HLSDecoderError> {
-        let playlist_text = fetch_playlist(media_playlist_url).await?;
-        let media_playlist = parse_media_playlist(&playlist_text).await?.into_owned();
-        let segments = resolve_segments(
-            client,
-            &media_playlist,
-            media_playlist_url,
-            base_url,
-            key_query_params,
-            key_request_headers,
-            key_processor_cb,
-        )
-        .await?;
+            SegmentList::resolve_segments(client, config, &media_playlist, media_playlist_url)
+                .await?;
         let target_duration = media_playlist.target_duration;
 
         Ok(StreamDetails {
@@ -227,16 +178,11 @@ impl HLSStream {
 
             // If we don't need to reconnect, restore the old stream which was ongoing so we have continuity
             if should_seek && !reconnect {
-                let new_segment = stream_details
-                    .segments
-                    .get_mut(new_current_index)
-                    .expect("Segment should exist");
-
                 if let Some(old_active_segment) = old_seg {
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!("Restoring old stream at index {}", new_current_index);
-                    *new_segment = old_active_segment;
-                    // No need to seek if we're replacing the old active stream
+                    stream_details
+                        .segments
+                        .replace_segment(old_active_segment)
+                        .await;
                     return Ok(false);
                 }
             }
@@ -246,52 +192,21 @@ impl HLSStream {
         Ok(should_seek)
     }
 
-    #[cfg(not(feature = "aes-encryption"))]
     pub(crate) async fn reload_playlist(
+        config: &Config,
         media_playlist_url: &Url,
         stream_details: Arc<RwLock<StreamDetails>>,
-        base_url: Option<&Url>,
         reconnect: bool,
     ) -> Result<bool, HLSDecoderError> {
         let client = Client::new();
-        let new_details = Self::parse_playlist(client, media_playlist_url, base_url).await?;
-        Self::update_stream_details(new_details, stream_details, reconnect).await
-    }
-
-    #[cfg(feature = "aes-encryption")]
-    pub(crate) async fn reload_playlist(
-        media_playlist_url: &Url,
-        stream_details: Arc<RwLock<StreamDetails>>,
-        base_url: Option<&Url>,
-        key_query_params: Option<HashMap<String, String>>,
-        key_request_headers: Option<HashMap<String, String>>,
-        key_processor_cb: Option<Arc<Box<KeyProcessorCallback>>>,
-        reconnect: bool,
-    ) -> Result<bool, HLSDecoderError> {
-        let client = Client::new();
-        let new_details = Self::parse_playlist(
-            client,
-            media_playlist_url,
-            base_url,
-            key_query_params,
-            key_request_headers,
-            key_processor_cb,
-        )
-        .await?;
+        let new_details = Self::parse_playlist(client, config, media_playlist_url).await?;
         Self::update_stream_details(new_details, stream_details, reconnect).await
     }
 
     fn spawn_reload_loop(&self) {
         let stream_details = self.stream_details.clone();
         let media_playlist = self.media_playlist_url.clone();
-        let base_url = self.config.get_base_url();
-
-        #[cfg(feature = "aes-encryption")]
-        let key_processor_cb = self.config.get_key_processor_cb();
-        #[cfg(feature = "aes-encryption")]
-        let key_query_params = self.config.get_key_query_params();
-        #[cfg(feature = "aes-encryption")]
-        let key_request_headers = self.config.get_key_request_headers();
+        let config = self.config.clone();
 
         tokio::spawn(async move {
             let stream_details = stream_details.clone();
@@ -299,26 +214,9 @@ impl HLSStream {
             loop {
                 tokio::time::sleep(target_duration).await;
 
-                #[cfg(feature = "aes-encryption")]
-                let resp = Self::reload_playlist(
-                    &media_playlist,
-                    stream_details.clone(),
-                    base_url.as_ref(),
-                    key_query_params.clone(),
-                    key_request_headers.clone(),
-                    key_processor_cb.clone(),
-                    false,
-                )
-                .await;
-
-                #[cfg(not(feature = "aes-encryption"))]
-                let resp = Self::reload_playlist(
-                    &media_playlist,
-                    stream_details.clone(),
-                    base_url.as_ref(),
-                    false,
-                )
-                .await;
+                let resp =
+                    Self::reload_playlist(&config, &media_playlist, stream_details.clone(), false)
+                        .await;
 
                 if resp.is_ok() {
                     target_duration = stream_details.read().await.target_duration;
@@ -441,16 +339,16 @@ impl Stream for HLSStream {
                 .segments
                 .poll_stream(cx, stream_details.current_index)
             {
-                Some(std::task::Poll::Ready(Some(item))) => {
+                std::task::Poll::Ready(Some(item)) => {
                     // We got data from the current segment. Return it.
                     return std::task::Poll::Ready(Some(item));
                 }
-                Some(std::task::Poll::Pending) => {
+                std::task::Poll::Pending => {
                     // The underlying segment stream is waiting on I/O.
                     // Propagate the Pending state.
                     return std::task::Poll::Pending;
                 }
-                Some(std::task::Poll::Ready(None)) | None => {
+                std::task::Poll::Ready(None) => {
                     // The current segment has finished. We need to advance the index.
                     // First, release the read lock.
                     drop(stream_details);
