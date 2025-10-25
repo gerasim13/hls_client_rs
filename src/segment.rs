@@ -3,7 +3,7 @@ use std::{
     io,
     ops::ControlFlow,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
 };
 
@@ -28,17 +28,13 @@ use {
 };
 
 #[cfg(feature = "aes-encryption")]
-use {
-    crate::aes::{SegmentEncryptionData, SegmentListDecryptionState},
-    std::sync::Mutex,
-};
+use crate::aes::{SegmentEncryptionData, SegmentListDecryptionState};
 
 #[async_trait]
 pub(crate) trait SegmentResolver<T, 'a>
 where
     T: Send + Sync + 'static,
 {
-    fn poll_stream(&self, cx: &mut Context<'_>, index: usize) -> Poll<Option<ReqwestStreamItem>>;
     async fn resolve_segments(
         client: Client,
         config: &Config,
@@ -46,10 +42,12 @@ where
         playlist_url: &Url,
     ) -> Result<SegmentList, HLSDecoderError>;
     async fn download_segment(params: T) -> Result<Arc<RwLock<StreamSegment>>, HLSDecoderError>;
+    fn poll_stream(&self, cx: &mut Context<'_>, index: usize) -> Poll<Option<ReqwestStreamItem>>;
 }
 
 #[derive(Debug)]
 pub(crate) struct SegmentList {
+    pub(crate) cached_content_length: Mutex<Option<u64>>,
     pub(crate) segments: Vec<Arc<RwLock<StreamSegment>>>,
     #[cfg(feature = "aes-encryption")]
     pub(crate) decryption_state: Mutex<Option<SegmentListDecryptionState>>,
@@ -173,6 +171,7 @@ impl SegmentList {
     pub fn new(segments: Vec<Arc<RwLock<StreamSegment>>>) -> Self {
         Self {
             segments,
+            cached_content_length: Mutex::new(None),
             #[cfg(feature = "aes-encryption")]
             decryption_state: Mutex::new(None),
         }
@@ -204,11 +203,12 @@ impl SegmentList {
 
     /// Returns the total content length of all segments combined.
     pub fn content_length(&self) -> Option<u64> {
-        Some(self.content_lengths().sum())
+        let cached_content_lenght_guard = self.cached_content_length.lock().unwrap();
+        cached_content_lenght_guard.or(Some(self.content_lengths().sum()))
     }
 
     /// Returns an iterator of content lengths for each segment.
-    fn content_lengths(&self) -> impl Iterator<Item = u64> + '_ {
+    pub fn content_lengths(&self) -> impl Iterator<Item = u64> + '_ {
         self.segments
             .iter()
             .filter_map(|s| s.try_read().ok())
@@ -306,6 +306,14 @@ impl SegmentList {
         tracing::debug!("Restoring old stream at index {}", index);
         *current_segment = new_segment;
     }
+
+    /// Updates the cached content length.
+    pub(crate) fn update_cached_content_length(&self) {
+        let mut cached_content_lenght_guard = self.cached_content_length.lock().unwrap();
+        if let Some(content_lenght_guard) = cached_content_lenght_guard.as_mut() {
+            *content_lenght_guard = self.content_lengths().sum();
+        }
+    }
 }
 
 // A helper struct for downloading segments.
@@ -325,23 +333,6 @@ struct SegmentMeta<'a> {
 #[cfg(not(feature = "aes-encryption"))]
 #[async_trait]
 impl<'a> SegmentResolver<DownloadSegmentParams, 'a> for SegmentList {
-    /// Polls the current stream for the next item.
-    fn poll_stream(&self, cx: &mut Context<'_>, index: usize) -> Poll<Option<ReqwestStreamItem>> {
-        if let Some(segment_arc) = self.segments.get(index) {
-            // Try to get a read lock on the segment without blocking.
-            match segment_arc.try_read() {
-                Ok(segment) => segment.poll_stream(cx),
-                Err(_) => {
-                    // If the lock is held (e.g., for writing during a seek),
-                    // we cannot proceed. Return Pending to be polled again later.
-                    Poll::Pending
-                }
-            }
-        } else {
-            Poll::Pending
-        }
-    }
-
     /// Resolves all segments from a media playlist, including downloading them.
     async fn resolve_segments(
         client: Client,
@@ -429,5 +420,28 @@ impl<'a> SegmentResolver<DownloadSegmentParams, 'a> for SegmentList {
 
         let segment = StreamSegment::new(uri, stream, headers, content_type, content_length);
         Ok(Arc::new(RwLock::new(segment)))
+    }
+
+    /// Polls the current stream for the next item.
+    fn poll_stream(&self, cx: &mut Context<'_>, index: usize) -> Poll<Option<ReqwestStreamItem>> {
+        if let Some(segment_arc) = self.segments.get(index) {
+            // Try to get a read lock on the segment without blocking.
+            match segment_arc.try_read() {
+                Ok(segment) => match segment.poll_stream(cx) {
+                    Poll::Ready(None) => {
+                        self.update_cached_content_length();
+                        Poll::Ready(None)
+                    }
+                    r => r,
+                },
+                Err(_) => {
+                    // If the lock is held (e.g., for writing during a seek),
+                    // we cannot proceed. Return Pending to be polled again later.
+                    Poll::Pending
+                }
+            }
+        } else {
+            Poll::Pending
+        }
     }
 }

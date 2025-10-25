@@ -18,7 +18,7 @@ use futures::{future::join_all, TryStreamExt};
 use hls_m3u8::{types::DecryptionKey, Decryptable, MediaPlaylist};
 use reqwest::StatusCode;
 use reqwest::{Client, Url};
-use tokio::sync::{RwLock, RwLockReadGuard};
+use tokio::sync::RwLock;
 
 use crate::{
     config::Config,
@@ -194,76 +194,6 @@ async fn get_key_iv(
 
 #[async_trait]
 impl<'a> SegmentResolver<DownloadAesSegmentParams, 'a> for SegmentList {
-    fn poll_stream(&self, cx: &mut Context<'_>, index: usize) -> Poll<Option<ReqwestStreamItem>> {
-        if let Some(segment_arc) = self.segments.get(index) {
-            // Try to get a read lock on the segment without blocking.
-            match segment_arc.try_read() {
-                Ok(segment) => {
-                    if let Some(data) = &segment.encryption_data {
-                        let key = data.key;
-                        let iv = data.iv.unwrap_or_else(|| data.media_sequence.to_be_bytes());
-
-                        let mut state_guard = self.decryption_state.lock().unwrap();
-                        let reinitialize = match &*state_guard {
-                            Some(state) => state.key != key || state.iv != iv,
-                            None => true,
-                        };
-                        if reinitialize {
-                            *state_guard = Some(SegmentListDecryptionState::new(key, iv));
-                        }
-
-                        let state = state_guard.as_mut().unwrap();
-                        state.update_decryption_state(key, iv);
-
-                        loop {
-                            match segment.poll_stream(cx) {
-                                Poll::Ready(Some(Ok(new_bytes))) => {
-                                    state.buffer.extend_from_slice(&new_bytes)
-                                }
-                                Poll::Ready(None) => {
-                                    if state.buffer.is_empty() {
-                                        return Poll::Ready(None);
-                                    }
-                                    let final_chunk_res = state
-                                        .decryptor
-                                        .clone()
-                                        .decrypt_padded_mut::<Pkcs7>(&mut state.buffer)
-                                        .map_err(|e| {
-                                            StreamItemError::Decryption(format!(
-                                                "Final block decryption failed: {:?}",
-                                                e
-                                            ))
-                                        })
-                                        .map(Bytes::copy_from_slice);
-
-                                    if let Ok(ref final_chunk) = final_chunk_res {
-                                        data.length
-                                            .fetch_add(final_chunk.len() as u64, Ordering::SeqCst);
-                                    }
-
-                                    state.buffer.clear();
-                                    return Poll::Ready(Some(final_chunk_res));
-                                }
-                                Poll::Pending => return Poll::Pending,
-                                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
-                            }
-                        }
-                    } else {
-                        // If segment is not encrypted just poll its inner stream.
-                        return segment.poll_stream(cx);
-                    }
-                }
-                Err(_) => {
-                    // If the lock is held (e.g., for writing during a seek),
-                    // we cannot proceed. Return Pending to be polled again later.
-                    Poll::Pending
-                }
-            }
-        } else {
-            return Poll::Pending;
-        }
-    }
-
     async fn resolve_segments(
         client: Client,
         config: &Config,
@@ -409,5 +339,76 @@ impl<'a> SegmentResolver<DownloadAesSegmentParams, 'a> for SegmentList {
             encryption_data,
         );
         Ok(Arc::new(RwLock::new(segment)))
+    }
+
+    fn poll_stream(&self, cx: &mut Context<'_>, index: usize) -> Poll<Option<ReqwestStreamItem>> {
+        if let Some(segment_arc) = self.segments.get(index) {
+            // Try to get a read lock on the segment without blocking.
+            match segment_arc.try_read() {
+                Ok(segment) => {
+                    if let Some(data) = &segment.encryption_data {
+                        let key = data.key;
+                        let iv = data.iv.unwrap_or_else(|| data.media_sequence.to_be_bytes());
+
+                        let mut state_guard = self.decryption_state.lock().unwrap();
+                        let reinitialize = match &*state_guard {
+                            Some(state) => state.key != key || state.iv != iv,
+                            None => true,
+                        };
+                        if reinitialize {
+                            *state_guard = Some(SegmentListDecryptionState::new(key, iv));
+                        }
+
+                        let state = state_guard.as_mut().unwrap();
+                        state.update_decryption_state(key, iv);
+
+                        loop {
+                            match segment.poll_stream(cx) {
+                                Poll::Ready(Some(Ok(new_bytes))) => {
+                                    state.buffer.extend_from_slice(&new_bytes)
+                                }
+                                Poll::Ready(None) => {
+                                    if state.buffer.is_empty() {
+                                        return Poll::Ready(None);
+                                    }
+                                    let final_chunk_res = state
+                                        .decryptor
+                                        .clone()
+                                        .decrypt_padded_mut::<Pkcs7>(&mut state.buffer)
+                                        .map_err(|e| {
+                                            StreamItemError::Decryption(format!(
+                                                "Final block decryption failed: {:?}",
+                                                e
+                                            ))
+                                        })
+                                        .map(Bytes::copy_from_slice);
+
+                                    if let Ok(ref final_chunk) = final_chunk_res {
+                                        data.length
+                                            .fetch_add(final_chunk.len() as u64, Ordering::SeqCst);
+                                    }
+
+                                    self.update_cached_content_length();
+                                    state.buffer.clear();
+
+                                    return Poll::Ready(Some(final_chunk_res));
+                                }
+                                r => return r,
+                            }
+                        }
+                    } else {
+                        // If segment is not encrypted just poll its inner stream.
+                        return segment.poll_stream(cx);
+                    }
+                }
+                Err(_) => {
+                    // If the lock is held (e.g., for writing during a seek),
+                    // we cannot proceed. Return Pending to be polled again later.
+                    Poll::Pending
+                }
+            }
+        } else {
+            return Poll::Pending;
+        }
     }
 }
