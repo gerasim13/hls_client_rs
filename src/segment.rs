@@ -186,14 +186,6 @@ impl SegmentList {
         self.segments.get(index)
     }
 
-    /// Returns the content type of the first segment, if available.
-    fn content_type(&self) -> Option<String> {
-        self.segments
-            .first()
-            .and_then(|s| s.try_read().ok())
-            .map(|s| s.content_type.clone())
-    }
-
     /// Returns the total content length of all segments combined.
     pub fn content_length(&self) -> Option<u64> {
         Some(self.content_lengths().sum())
@@ -320,8 +312,6 @@ pub(crate) struct DownloadSegmentParams {
 struct SegmentMeta<'a> {
     uri: &'a str,
     key_info: Option<&'a DecryptionKey<'a>>,
-    #[cfg(feature = "aes-encryption")]
-    media_sequence: usize,
 }
 
 #[cfg(not(feature = "aes-encryption"))]
