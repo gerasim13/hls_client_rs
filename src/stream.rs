@@ -241,20 +241,6 @@ impl HLSStream {
         }
     }
 
-    pub(crate) fn content_length(&self) -> Option<u64> {
-        match self.stream_details.try_read() {
-            Ok(guard) => {
-                let is_infinite_stream = is_infinite_stream(&guard.media_playlist);
-                if is_infinite_stream {
-                    None
-                } else {
-                    guard.segments.content_length()
-                }
-            }
-            Err(_) => None,
-        }
-    }
-
     pub(crate) async fn supports_range_request(&self) -> bool {
         self.stream_details
             .read()
@@ -305,6 +291,20 @@ impl HLSStream {
                 stream_details.finished = false;
                 Ok(())
             }
+        }
+    }
+
+    pub(crate) fn content_length(&self) -> Option<u64> {
+        match self.stream_details.try_read() {
+            Ok(guard) => {
+                let is_infinite_stream = is_infinite_stream(&guard.media_playlist);
+                if is_infinite_stream {
+                    None
+                } else {
+                    guard.segments.content_length()
+                }
+            }
+            Err(_) => None,
         }
     }
 }
