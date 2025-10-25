@@ -2,7 +2,7 @@ use std::{fs, io, pin::Pin, sync::Arc, time::Duration};
 
 use futures::Stream;
 use hls_m3u8::{tags::VariantStream, MasterPlaylist, MediaPlaylist};
-use reqwest::{Client, Url};
+use reqwest::{header::HeaderMap, Client, Url};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -225,6 +225,20 @@ impl HLSStream {
                 }
             }
         });
+    }
+
+    pub fn content_type(&self) -> Option<String> {
+        match self.stream_details.try_read() {
+            Ok(guard) => guard.segments.content_type(),
+            Err(_) => None,
+        }
+    }
+
+    pub fn headers(&self) -> Vec<HeaderMap> {
+        match self.stream_details.try_read() {
+            Ok(guard) => guard.segments.headers().collect(),
+            Err(_) => Vec::new(),
+        }
     }
 
     pub(crate) fn content_length(&self) -> Option<u64> {

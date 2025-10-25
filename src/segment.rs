@@ -186,6 +186,22 @@ impl SegmentList {
         self.segments.get(index)
     }
 
+    /// Returns an iterator of headers for each segment.
+    pub fn headers(&self) -> impl Iterator<Item = HeaderMap> + '_ {
+        self.segments
+            .iter()
+            .filter_map(|s| s.try_read().ok())
+            .map(|s| s.headers.clone())
+    }
+
+    /// Returns the content type of the first segment, if available.
+    pub fn content_type(&self) -> Option<String> {
+        self.segments
+            .first()
+            .and_then(|s| s.try_read().ok())
+            .map(|s| s.content_type.clone())
+    }
+
     /// Returns the total content length of all segments combined.
     pub fn content_length(&self) -> Option<u64> {
         Some(self.content_lengths().sum())
@@ -224,14 +240,6 @@ impl SegmentList {
             Some(ControlFlow::Break(_)) => Some(false),
             None => None,
         }
-    }
-
-    /// Returns an iterator of headers for each segment.
-    fn headers(&self) -> impl Iterator<Item = HeaderMap> + '_ {
-        self.segments
-            .iter()
-            .filter_map(|s| s.try_read().ok())
-            .map(|s| s.headers.clone())
     }
 
     /// Iterates over each segment's headers and applies a function to them.
