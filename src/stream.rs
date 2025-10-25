@@ -138,15 +138,18 @@ impl HLSStream {
         })
     }
 
-    async fn update_stream_details(
-        new_details: StreamDetails,
-        old_stream_details: Arc<RwLock<StreamDetails>>,
+    pub(crate) async fn reload_playlist(
+        config: &Config,
+        media_playlist_url: &Url,
+        stream_details: Arc<RwLock<StreamDetails>>,
         reconnect: bool,
     ) -> Result<bool, HLSDecoderError> {
+        let client = Client::new();
+        let new_details = Self::parse_playlist(client, config, media_playlist_url).await?;
         #[cfg(feature = "tracing")]
         tracing::debug!("Reloading playlist");
         let should_seek = {
-            let mut stream_details = old_stream_details.write().await;
+            let mut stream_details = stream_details.write().await;
             let old_index = stream_details.current_index;
             let old_seg = if stream_details.finished {
                 None
@@ -190,17 +193,6 @@ impl HLSStream {
         };
 
         Ok(should_seek)
-    }
-
-    pub(crate) async fn reload_playlist(
-        config: &Config,
-        media_playlist_url: &Url,
-        stream_details: Arc<RwLock<StreamDetails>>,
-        reconnect: bool,
-    ) -> Result<bool, HLSDecoderError> {
-        let client = Client::new();
-        let new_details = Self::parse_playlist(client, config, media_playlist_url).await?;
-        Self::update_stream_details(new_details, stream_details, reconnect).await
     }
 
     fn spawn_reload_loop(&self) {
