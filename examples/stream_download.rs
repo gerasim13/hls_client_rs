@@ -28,8 +28,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     )
     .await?;
 
-    let (_stream, handle) = rodio::OutputStream::try_default()?;
-    let sink = rodio::Sink::try_new(&handle)?;
+    let stream_handle =
+        rodio::OutputStreamBuilder::open_default_stream().expect("open default audio stream");
+    let sink = rodio::Sink::connect_new(&stream_handle.mixer());
     sink.append(rodio::Decoder::new(decoder)?);
 
     sink.sleep_until_end();

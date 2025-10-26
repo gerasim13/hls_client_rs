@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use hls_client::config::ConfigBuilder;
 use hls_client::stream::HLSStream;
-use libmpv2::events::{Event, EventContext};
+use libmpv2::events::Event;
 use libmpv2::protocol::Protocol;
 use libmpv2::Mpv;
 use stream_download::storage::adaptive::AdaptiveStorageProvider;
@@ -42,8 +42,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .unwrap_or_else(|| "https://ezharjan.github.io/M3U8Example/ene.m3u8".to_string());
     // SAFETY: we don't call any libmpv functions in the provided callback functions
+    let mpv = Mpv::new()?;
     let protocol = unsafe {
         Protocol::new(
+            &mpv,
             "stream".into(),
             (),
             open,
@@ -53,14 +55,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Some(size),
         )
     };
-    let mpv = Mpv::new()?;
-    let proto_ctx = mpv.create_protocol_context();
-    proto_ctx.register(protocol)?;
+    protocol.register()?;
     mpv.command("loadfile", &[&format!("stream://{url}"), "append-play"])?;
-    let mut ev_ctx = EventContext::new(mpv.ctx);
-    ev_ctx.disable_deprecated_events()?;
+
+    let mut mpv_client = mpv.create_client("client".into())?;
     tokio::task::spawn_blocking(move || loop {
-        let ev = ev_ctx.wait_event(600.).unwrap_or(Err(libmpv2::Error::Null));
+        let ev = mpv_client
+            .wait_event(600.)
+            .unwrap_or(Err(libmpv2::Error::Null));
         if let Ok(Event::EndFile(_)) = ev {
             return;
         }
