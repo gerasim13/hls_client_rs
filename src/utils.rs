@@ -22,14 +22,6 @@ pub fn format_range_header_bytes(start: u64, end: Option<u64>) -> String {
     )
 }
 
-pub(crate) fn get_segment_uri(uri: &str, base_url: &str) -> String {
-    if uri.starts_with("http") {
-        uri.to_string()
-    } else {
-        format!("{}/{}", base_url, uri)
-    }
-}
-
 pub(crate) fn is_infinite_stream(media_playlist: &MediaPlaylist) -> bool {
     media_playlist.playlist_type.unwrap_or(PlaylistType::Event) == PlaylistType::Event
 }

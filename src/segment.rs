@@ -21,7 +21,6 @@ use crate::{
 
 #[cfg(not(feature = "aes-encryption"))]
 use {
-    crate::utils::get_segment_uri,
     futures::future::join_all,
     hls_m3u8::{types::DecryptionKey, Decryptable},
     std::collections::{hash_map::Entry, HashMap},
@@ -45,23 +44,22 @@ where
     fn poll_stream(&self, cx: &mut Context<'_>, index: usize) -> Poll<Option<ReqwestStreamItem>>;
 }
 
-#[derive(Debug)]
-pub(crate) struct SegmentList {
-    pub(crate) cached_content_length: Mutex<Option<u64>>,
-    pub(crate) segments: Vec<Arc<RwLock<StreamSegment>>>,
-    #[cfg(feature = "aes-encryption")]
-    pub(crate) decryption_state: Mutex<Option<SegmentListDecryptionState>>,
-}
-
 #[derive(Clone)]
 pub(crate) struct StreamSegment {
-    pub(crate) uri: String,
+    pub(crate) uri: Url,
     pub(crate) stream: Arc<RwLock<ReqwestStream>>,
     pub(crate) content_type: String,
     pub(crate) content_length: u64,
     pub(crate) headers: HeaderMap,
     #[cfg(feature = "aes-encryption")]
     pub(crate) encryption_data: Option<Arc<Box<SegmentEncryptionData>>>,
+}
+
+pub(crate) struct SegmentList {
+    pub(crate) cached_content_length: Mutex<Option<u64>>,
+    pub(crate) segments: Vec<Arc<RwLock<StreamSegment>>>,
+    #[cfg(feature = "aes-encryption")]
+    pub(crate) decryption_state: Mutex<SegmentListDecryptionState>,
 }
 
 impl Debug for StreamSegment {
@@ -77,6 +75,18 @@ impl Debug for StreamSegment {
     }
 }
 
+impl Debug for SegmentList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug_struct = f.debug_struct("SegmentList");
+        debug_struct
+            .field("cached_content_length", &self.cached_content_length)
+            .field("segments", &self.segments);
+        // #[cfg(feature = "aes-encryption")]
+        // debug_struct.field("decryption_state", &self.decryption_state);
+        debug_struct.finish()
+    }
+}
+
 impl PartialEq for StreamSegment {
     fn eq(&self, other: &Self) -> bool {
         self.uri == other.uri
@@ -85,7 +95,7 @@ impl PartialEq for StreamSegment {
 
 impl StreamSegment {
     pub fn new(
-        uri: String,
+        uri: Url,
         stream: Arc<RwLock<ReqwestStream>>,
         headers: HeaderMap,
         content_type: String,
@@ -173,7 +183,7 @@ impl SegmentList {
             segments,
             cached_content_length: Mutex::new(None),
             #[cfg(feature = "aes-encryption")]
-            decryption_state: Mutex::new(None),
+            decryption_state: Mutex::new(SegmentListDecryptionState::new()),
         }
     }
 
@@ -289,7 +299,7 @@ impl SegmentList {
     }
 
     /// Finds a segment by its URI.
-    pub fn find_segment(&self, uri: String) -> Option<usize> {
+    pub fn find_segment(&self, uri: Url) -> Option<usize> {
         self.segments
             .iter()
             .position(|s| s.try_read().map_or(false, |guard| guard.uri == uri))
@@ -320,7 +330,7 @@ impl SegmentList {
 #[cfg(not(feature = "aes-encryption"))]
 pub(crate) struct DownloadSegmentParams {
     client: Client,
-    uri: String,
+    uri: Url,
 }
 
 // A helper struct to unify the processing of initialization and media segments.
@@ -341,10 +351,10 @@ impl<'a> SegmentResolver<DownloadSegmentParams, 'a> for SegmentList {
         playlist_url: &Url,
     ) -> Result<SegmentList, HLSDecoderError> {
         let base_url = config.get_base_url();
-        let base = if let Some(base) = base_url.as_ref() {
-            base.as_str()
+        let base = if let Some(base) = base_url {
+            base
         } else {
-            playlist_url.as_str().trim_end_matches(".m3u8")
+            Url::parse(playlist_url.as_str().trim_end_matches(".m3u8"))?
         };
 
         // Collect metadata for all segments into a single list.
@@ -378,7 +388,7 @@ impl<'a> SegmentResolver<DownloadSegmentParams, 'a> for SegmentList {
         let segment_futs: Vec<_> = segment_metas
             .into_iter()
             .map(|meta| {
-                let uri = get_segment_uri(meta.uri, base);
+                let uri = base.join(meta.uri).unwrap();
                 Self::download_segment(DownloadSegmentParams {
                     client: client.clone(),
                     uri,
@@ -402,7 +412,7 @@ impl<'a> SegmentResolver<DownloadSegmentParams, 'a> for SegmentList {
         let client = params.client;
         let uri = params.uri;
 
-        let resp = client.get(&uri).send().await?;
+        let resp = client.get(uri.clone()).send().await?;
         let headers = resp.headers().clone();
         let content_length = resp.content_length().unwrap_or(0);
 

@@ -16,15 +16,14 @@ use cbc::{
 };
 use futures::{future::join_all, TryStreamExt};
 use hls_m3u8::{types::DecryptionKey, Decryptable, MediaPlaylist};
-use reqwest::StatusCode;
-use reqwest::{Client, Url};
+use reqwest::{Client, StatusCode, Url};
 use tokio::sync::RwLock;
 
 use crate::{
     config::Config,
     errors::{HLSDecoderError, StreamItemError},
     segment::{SegmentList, SegmentResolver, StreamSegment},
-    utils::{get_segment_uri, ReqwestStream, ReqwestStreamItem},
+    utils::{ReqwestStream, ReqwestStreamItem},
 };
 
 // Callback for transforming or decrypting HLS AES-128 keys.
@@ -81,35 +80,31 @@ impl SegmentEncryptionData {
 
 #[derive(Debug)]
 pub(crate) struct SegmentListDecryptionState {
-    key: [u8; 16],
-    iv: [u8; 16],
     buffer: Vec<u8>,
-    decryptor: Decryptor<Aes128>,
 }
 
 impl SegmentListDecryptionState {
-    fn new(key: [u8; 16], iv: [u8; 16]) -> Self {
+    pub fn new() -> Self {
         Self {
-            key,
-            iv,
             buffer: Vec::with_capacity(1024),
-            decryptor: Decryptor::<Aes128>::new((&key).into(), (&iv).into()),
         }
     }
 
-    fn update_decryption_state(&mut self, key: [u8; 16], iv: [u8; 16]) {
-        if self.key != key || self.iv != iv {
-            self.key = key;
-            self.iv = iv;
-            self.decryptor = Decryptor::<Aes128>::new((&key).into(), (&iv).into());
-        }
+    fn decrypt(&mut self, key: [u8; 16], iv: [u8; 16]) -> Result<Bytes, StreamItemError> {
+        let decryptor = Decryptor::<Aes128>::new((&key).into(), (&iv).into());
+        let res = decryptor
+            .decrypt_padded_mut::<Pkcs7>(&mut self.buffer)
+            .map_err(|e| StreamItemError::Decryption(format!("Decryption failed: {:?}", e)))
+            .map(Bytes::copy_from_slice);
+        self.buffer.clear();
+        res
     }
 }
 
 // A helper struct for downloading segments.
 pub(crate) struct DownloadAesSegmentParams {
     client: Client,
-    uri: String,
+    uri: Url,
     key: Option<[u8; 16]>,
     iv: Option<[u8; 16]>,
     media_sequence: u128,
@@ -117,32 +112,28 @@ pub(crate) struct DownloadAesSegmentParams {
 
 // A helper struct to unify the processing of initialization and media segments.
 struct SegmentMeta<'a> {
-    uri: &'a str,
+    uri: Url,
     key_info: Option<&'a DecryptionKey<'a>>,
     media_sequence: usize,
 }
 
 async fn get_key_iv(
     client: Client,
-    mut key_uri: String,
+    mut key_uri: Url,
     key_iv: Option<[u8; 16]>,
     key_query_params: Option<HashMap<String, String>>,
     key_request_headers: Option<HashMap<String, String>>,
     key_processor_cb: Option<Arc<Box<KeyProcessorCallback>>>,
-) -> Result<(String, Option<[u8; 16]>, Option<[u8; 16]>), HLSDecoderError> {
+) -> Result<(Url, Option<[u8; 16]>, Option<[u8; 16]>), HLSDecoderError> {
     if let Some(params) = key_query_params {
-        let mut url_obj = Url::parse(&key_uri)?;
-        {
-            let mut query_pairs = url_obj.query_pairs_mut();
-            for (k, v) in params {
-                query_pairs.append_pair(k.as_str(), v.as_str());
-            }
+        let mut query_pairs = key_uri.query_pairs_mut();
+        for (k, v) in params {
+            query_pairs.append_pair(k.as_str(), v.as_str());
         }
-        key_uri = url_obj.to_string();
     }
 
     // Create a request builder.
-    let mut request_builder = client.get(&key_uri);
+    let mut request_builder = client.get(key_uri.clone());
     // Add custom headers if they are provided.
     if let Some(headers) = key_request_headers {
         for (name, value) in headers {
@@ -205,10 +196,15 @@ impl<'a> SegmentResolver<DownloadAesSegmentParams, 'a> for SegmentList {
         let key_request_headers = config.get_key_request_headers();
         let key_processor_cb = config.get_key_processor_cb();
 
-        let base = if let Some(base) = base_url.as_ref() {
-            base.as_str()
+        let base = if let Some(base) = base_url {
+            base
         } else {
-            playlist_url.as_str().trim_end_matches(".m3u8")
+            Url::parse(playlist_url.as_str().trim_end_matches(".m3u8"))?
+        };
+
+        let resolve_uri = |uri: &str| match Url::parse(uri) {
+            Ok(url) => url,
+            Err(_) => base.join(uri).unwrap(),
         };
 
         // Collect metadata for all segments into a single list.
@@ -217,7 +213,7 @@ impl<'a> SegmentResolver<DownloadAesSegmentParams, 'a> for SegmentList {
         if let Some(first_segment) = media_playlist.segments.get(0) {
             if let Some(ref map) = first_segment.map {
                 segment_metas.push(SegmentMeta {
-                    uri: map.uri(),
+                    uri: resolve_uri(&map.uri()),
                     key_info: map.keys().get(0).cloned(),
                     media_sequence: starting_sequence,
                 });
@@ -225,7 +221,7 @@ impl<'a> SegmentResolver<DownloadAesSegmentParams, 'a> for SegmentList {
         }
         for (i, (_, segment)) in media_playlist.segments.iter().enumerate() {
             segment_metas.push(SegmentMeta {
-                uri: segment.uri(),
+                uri: resolve_uri(&segment.uri()),
                 key_info: segment.keys().get(0).cloned(),
                 media_sequence: starting_sequence + i,
             });
@@ -235,7 +231,8 @@ impl<'a> SegmentResolver<DownloadAesSegmentParams, 'a> for SegmentList {
         let mut key_requests = HashMap::new();
         for meta in &segment_metas {
             if let Some(key) = meta.key_info {
-                if let Entry::Vacant(entry) = key_requests.entry(key.uri().to_string()) {
+                let key_uri = resolve_uri(&key.uri());
+                if let Entry::Vacant(entry) = key_requests.entry(key_uri) {
                     entry.insert(key.iv.to_slice());
                 }
             }
@@ -266,10 +263,10 @@ impl<'a> SegmentResolver<DownloadAesSegmentParams, 'a> for SegmentList {
         let segment_futs: Vec<_> = segment_metas
             .into_iter()
             .map(|meta| {
-                let uri = get_segment_uri(meta.uri, base);
+                let uri = meta.uri;
 
                 let (key, iv) = if let Some(key_info) = meta.key_info {
-                    let key_uri = key_info.uri().to_string();
+                    let key_uri = resolve_uri(&key_info.uri());
                     let decrypted_key = cached_keys.get(&key_uri).cloned().flatten();
                     (decrypted_key, key_info.iv.to_slice())
                 } else {
@@ -303,7 +300,7 @@ impl<'a> SegmentResolver<DownloadAesSegmentParams, 'a> for SegmentList {
         let iv = params.iv;
         let media_sequence = params.media_sequence;
 
-        let resp = client.get(&uri).send().await?;
+        let resp = client.get(uri.clone()).send().await?;
         let headers = resp.headers().clone();
         let content_length = resp.content_length().unwrap_or(0);
 
@@ -350,17 +347,8 @@ impl<'a> SegmentResolver<DownloadAesSegmentParams, 'a> for SegmentList {
                         let key = data.key;
                         let iv = data.iv.unwrap_or_else(|| data.media_sequence.to_be_bytes());
 
-                        let mut state_guard = self.decryption_state.lock().unwrap();
-                        let reinitialize = match &*state_guard {
-                            Some(state) => state.key != key || state.iv != iv,
-                            None => true,
-                        };
-                        if reinitialize {
-                            *state_guard = Some(SegmentListDecryptionState::new(key, iv));
-                        }
-
+                        let mut state_guard = self.decryption_state.lock();
                         let state = state_guard.as_mut().unwrap();
-                        state.update_decryption_state(key, iv);
 
                         loop {
                             match segment.poll_stream(cx) {
@@ -371,34 +359,26 @@ impl<'a> SegmentResolver<DownloadAesSegmentParams, 'a> for SegmentList {
                                     if state.buffer.is_empty() {
                                         return Poll::Ready(None);
                                     }
-                                    let final_chunk_res = state
-                                        .decryptor
-                                        .clone()
-                                        .decrypt_padded_mut::<Pkcs7>(&mut state.buffer)
-                                        .map_err(|e| {
-                                            StreamItemError::Decryption(format!(
-                                                "Final block decryption failed: {:?}",
-                                                e
-                                            ))
-                                        })
-                                        .map(Bytes::copy_from_slice);
-
+                                    let final_chunk_res = state.decrypt(key, iv);
                                     if let Ok(ref final_chunk) = final_chunk_res {
                                         data.length
                                             .fetch_add(final_chunk.len() as u64, Ordering::SeqCst);
+                                        self.update_cached_content_length();
                                     }
-
-                                    self.update_cached_content_length();
-                                    state.buffer.clear();
-
                                     return Poll::Ready(Some(final_chunk_res));
                                 }
                                 r => return r,
                             }
                         }
                     } else {
-                        // If segment is not encrypted just poll its inner stream.
-                        return segment.poll_stream(cx);
+                        // // If segment is not encrypted just poll its inner stream.
+                        match segment.poll_stream(cx) {
+                            Poll::Ready(None) => {
+                                self.update_cached_content_length();
+                                Poll::Ready(None)
+                            }
+                            r => r,
+                        }
                     }
                 }
                 Err(_) => {
