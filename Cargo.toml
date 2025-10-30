@@ -33,7 +33,7 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
 
 [features]
-default = ["blocking", "reqwest-native-tls", "stream_download"]
+default = ["blocking", "reqwest-native-tls", "stream_download", "aes-encryption"]
 aes-encryption = ["dep:aes", "dep:cbc"]
 blocking = ["futures/executor"]
 reqwest-native-tls = ["reqwest", "reqwest/native-tls"]
@@ -47,11 +47,14 @@ required-features = ["blocking", "reqwest-native-tls"]
 doc-scrape-examples = true
 
 [[example]]
+name = "encrypted"
+required-features = ["blocking", "reqwest-native-tls", "aes-encryption",]
+
+[[example]]
 name = "stream_download"
 required-features = ["stream_download", "reqwest-native-tls"]
 
 [[example]]
 name = "video_mpv"
 required-features = ["stream_download", "reqwest-native-tls"]
-
 doc-scrape-examples = true
