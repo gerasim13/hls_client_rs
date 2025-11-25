@@ -29,6 +29,12 @@ use {
 #[cfg(feature = "aes-encryption")]
 use crate::aes::{SegmentEncryptionData, SegmentListDecryptionState};
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) struct StreamLength {
+    pub(crate) reported: u64,
+    pub(crate) gathered: Option<u64>,
+}
+
 #[async_trait]
 pub(crate) trait SegmentResolver<T, 'a>
 where
@@ -56,7 +62,7 @@ pub(crate) struct StreamSegment {
 }
 
 pub(crate) struct SegmentList {
-    pub(crate) cached_content_length: Mutex<Option<u64>>,
+    pub(crate) cached_content_length: Mutex<StreamLength>,
     pub(crate) segments: Vec<Arc<RwLock<StreamSegment>>>,
     #[cfg(feature = "aes-encryption")]
     pub(crate) decryption_state: Mutex<SegmentListDecryptionState>,
@@ -179,9 +185,17 @@ pub enum SeekResult {
 // SegmentList implementation
 impl SegmentList {
     pub fn new(segments: Vec<Arc<RwLock<StreamSegment>>>) -> Self {
+        let content_length = StreamLength {
+            gathered: None,
+            reported: segments
+                .iter()
+                .filter_map(|s| s.try_read().ok())
+                .map(|s| s.content_length)
+                .sum(),
+        };
         Self {
             segments,
-            cached_content_length: Mutex::new(None),
+            cached_content_length: Mutex::new(content_length),
             #[cfg(feature = "aes-encryption")]
             decryption_state: Mutex::new(SegmentListDecryptionState::new()),
         }
@@ -212,9 +226,9 @@ impl SegmentList {
     }
 
     /// Returns the total content length of all segments combined.
-    pub fn content_length(&self) -> Option<u64> {
+    pub fn content_length(&self) -> StreamLength {
         let cached_content_lenght_guard = self.cached_content_length.lock().unwrap();
-        cached_content_lenght_guard.or(Some(self.content_lengths().sum()))
+        cached_content_lenght_guard.clone()
     }
 
     /// Returns an iterator of content lengths for each segment.
@@ -267,7 +281,8 @@ impl SegmentList {
 
     /// Seeks to a specific segment within the list.
     pub fn seek_segment(&self, start: u64, end: Option<u64>) -> SeekResult {
-        if let Some(total_length) = self.content_length() {
+        let content_length = self.content_length();
+        if let Some(total_length) = content_length.gathered {
             if start == total_length && total_length != 0 {
                 return SeekResult::EndOfStream;
             }
@@ -320,9 +335,7 @@ impl SegmentList {
     /// Updates the cached content length.
     pub(crate) fn update_cached_content_length(&self) {
         let mut cached_content_lenght_guard = self.cached_content_length.lock().unwrap();
-        if let Some(content_lenght_guard) = cached_content_lenght_guard.as_mut() {
-            *content_lenght_guard = self.content_lengths().sum();
-        }
+        cached_content_lenght_guard.gathered = Some(self.content_lengths().sum());
     }
 }
 

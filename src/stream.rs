@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 use crate::{
     config::{Config, VariantStreamSelector},
     errors::HLSDecoderError,
-    segment::{SeekResult, SegmentList, SegmentResolver},
+    segment::{SeekResult, SegmentList, SegmentResolver, StreamLength},
     utils::{fetch_playlist, is_infinite_stream, parse_media_playlist, ReqwestStreamItem},
 };
 
@@ -71,7 +71,7 @@ impl HLSStream {
             stream_details: Arc::new(RwLock::new(details)),
         };
 
-        if content_length.is_none() {
+        if content_length.gathered.is_none() {
             ret.spawn_reload_loop();
         }
 
@@ -286,17 +286,17 @@ impl HLSStream {
         }
     }
 
-    pub(crate) fn content_length(&self) -> Option<u64> {
+    pub(crate) fn content_length(&self) -> StreamLength {
         match self.stream_details.try_read() {
             Ok(guard) => {
                 let is_infinite_stream = is_infinite_stream(&guard.media_playlist);
                 if is_infinite_stream {
-                    None
+                    Default::default()
                 } else {
                     guard.segments.content_length()
                 }
             }
-            Err(_) => None,
+            Err(_) => Default::default(),
         }
     }
 }
@@ -382,11 +382,8 @@ fn get_finished_poll_result(
     stream_details: &StreamDetails,
 ) -> std::task::Poll<Option<ReqwestStreamItem>> {
     // If the stream is infinite, always return pending. Otherwise tell the reader that we've exhausted the streams
-    if stream_details
-        .segments
-        .content_length()
-        .is_none_or(|c| c == 0)
-    {
+    let content_length = stream_details.segments.content_length();
+    if content_length.gathered.is_none_or(|c| c == 0) {
         std::task::Poll::Pending
     } else {
         std::task::Poll::Ready(None)

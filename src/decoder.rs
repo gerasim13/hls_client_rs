@@ -73,7 +73,7 @@ impl Seek for HLSDecoder {
         let abs_pos = match pos {
             std::io::SeekFrom::Start(pos) => pos,
             std::io::SeekFrom::End(pos) => {
-                if let Some(content_len) = content_len {
+                if let Some(content_len) = content_len.gathered {
                     let tmp_pos = (content_len as i64) + pos;
                     if tmp_pos < 0 {
                         return Err(std::io::Error::new(
@@ -102,7 +102,7 @@ impl Seek for HLSDecoder {
             }
         };
 
-        let normal_pos = abs_pos.min(content_len.unwrap_or(0));
+        let normal_pos = abs_pos.min(content_len.gathered.unwrap_or(0));
         block_on(self.stream.handle_seek(normal_pos, None))?;
 
         Ok(normal_pos)
