@@ -158,7 +158,7 @@ impl HLSStream {
             };
 
             #[cfg(feature = "tracing")]
-            tracing::debug!(
+            tracing::trace!(
                 "old_seg: {:?}, old_index: {}, newsegments: {:?}",
                 old_seg,
                 old_index,
@@ -211,7 +211,11 @@ impl HLSStream {
                         .await;
 
                 if resp.is_ok() {
-                    target_duration = stream_details.read().await.target_duration;
+                    let new_duration = stream_details.read().await.target_duration;
+                    if new_duration == target_duration {
+                        break;
+                    }
+                    target_duration = new_duration;
                 } else {
                     break;
                 }
@@ -346,8 +350,16 @@ impl Stream for HLSStream {
                 .poll_stream(cx, stream_details.current_index)
             {
                 std::task::Poll::Ready(Some(item)) => {
-                    // We got data from the current segment. Return it.
-                    return std::task::Poll::Ready(Some(item));
+                    match item {
+                        Ok(bytes) => {
+                            // We got data from the current segment. Return it.
+                            return std::task::Poll::Ready(Some(Ok(bytes)));
+                        }
+                        Err(err) => {
+                            // We got an error from the current segment. Return it.
+                            return std::task::Poll::Ready(Some(Err(err)));
+                        }
+                    }
                 }
                 std::task::Poll::Pending => {
                     // The underlying segment stream is waiting on I/O.

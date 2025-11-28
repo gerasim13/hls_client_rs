@@ -21,6 +21,7 @@ mediatype = { version = "0.20.0", default-features = false }
 reqwest = { version = "0.12.24", features = [ "stream" ], default-features = false, optional = true }
 stream-download = { version = "0.22.7", optional = true, default-features = false }
 tokio = { version = "1.48.0", default-features = false }
+tokio-util = "0.7.10"
 tracing = { version = "0.1.41", optional = true }
 aes = { version = "0.8.4", optional = true }
 cbc = { version = "0.1.2", optional = true }

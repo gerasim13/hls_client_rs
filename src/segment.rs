@@ -31,7 +31,7 @@ use crate::aes::{SegmentEncryptionData, SegmentListDecryptionState};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) struct StreamLength {
-    pub(crate) reported: u64,
+    pub(crate) reported: Option<u64>,
     pub(crate) gathered: Option<u64>,
 }
 
@@ -72,11 +72,9 @@ impl Debug for StreamSegment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug_struct = f.debug_struct("StreamSegment");
         debug_struct
-            .field("uri", &self.uri)
+            .field("uri", &self.uri.to_string())
             .field("content_type", &self.content_type)
             .field("content_length", &self.content_length);
-        // #[cfg(feature = "aes-encryption")]
-        // debug_struct.field("encryption_data", &self.encryption_data);
         debug_struct.finish()
     }
 }
@@ -86,9 +84,7 @@ impl Debug for SegmentList {
         let mut debug_struct = f.debug_struct("SegmentList");
         debug_struct
             .field("cached_content_length", &self.cached_content_length)
-            .field("segments", &self.segments);
-        // #[cfg(feature = "aes-encryption")]
-        // debug_struct.field("decryption_state", &self.decryption_state);
+            .field("segments_count", &self.segments.len());
         debug_struct.finish()
     }
 }
@@ -185,13 +181,14 @@ pub enum SeekResult {
 // SegmentList implementation
 impl SegmentList {
     pub fn new(segments: Vec<Arc<RwLock<StreamSegment>>>) -> Self {
+        let reported_content_length = segments
+            .iter()
+            .filter_map(|s| s.try_read().ok())
+            .map(|s| s.content_length)
+            .sum();
         let content_length = StreamLength {
             gathered: None,
-            reported: segments
-                .iter()
-                .filter_map(|s| s.try_read().ok())
-                .map(|s| s.content_length)
-                .sum(),
+            reported: Some(reported_content_length),
         };
         Self {
             segments,
@@ -334,8 +331,49 @@ impl SegmentList {
 
     /// Updates the cached content length.
     pub(crate) fn update_cached_content_length(&self) {
-        let mut cached_content_lenght_guard = self.cached_content_length.lock().unwrap();
-        cached_content_lenght_guard.gathered = Some(self.content_lengths().sum());
+        let fully_fetched_and_decrypted_length = self
+            .segments
+            .iter()
+            .filter_map(|s| s.try_read().ok())
+            .filter_map(|s| {
+                let length = {
+                    #[cfg(feature = "aes-encryption")]
+                    if let Some(data) = &s.encryption_data {
+                        data.decrypted_content_length()
+                    } else {
+                        s.content_length
+                    }
+                };
+                if length > 0 {
+                    Some(s)
+                } else {
+                    None
+                }
+            })
+            .map(|s| {
+                #[cfg(feature = "aes-encryption")]
+                {
+                    if let Some(data) = &s.encryption_data {
+                        let decrypted_length = data.decrypted_content_length();
+                        if decrypted_length > 0 {
+                            return decrypted_length;
+                        }
+                    }
+                }
+                s.content_length
+            });
+        if self.segments.len() == fully_fetched_and_decrypted_length.clone().count() {
+            if let Ok(mut cached_content_lenght_guard) = self.cached_content_length.lock() {
+                let new_content_length = fully_fetched_and_decrypted_length.sum();
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    "Updated content length from {:?} to {}",
+                    cached_content_lenght_guard.gathered,
+                    new_content_length
+                );
+                cached_content_lenght_guard.gathered = Some(new_content_length);
+            }
+        }
     }
 }
 

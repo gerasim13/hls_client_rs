@@ -94,7 +94,7 @@ impl SegmentListDecryptionState {
         let decryptor = Decryptor::<Aes128>::new((&key).into(), (&iv).into());
         let res = decryptor
             .decrypt_padded_mut::<Pkcs7>(&mut self.buffer)
-            .map_err(|e| StreamItemError::Decryption(format!("Decryption failed: {:?}", e)))
+            .map_err(|e| StreamItemError::Decryption(e.to_string()))
             .map(Bytes::copy_from_slice);
         self.buffer.clear();
         res
@@ -152,7 +152,7 @@ async fn get_key_iv(
 
     let raw_bytes = resp.bytes().await?;
     #[cfg(feature = "tracing")]
-    tracing::debug!(
+    tracing::trace!(
         "Fetched raw key ({} bytes): {:?}",
         raw_bytes.len(),
         raw_bytes
@@ -164,7 +164,7 @@ async fn get_key_iv(
     };
 
     #[cfg(feature = "tracing")]
-    tracing::debug!(
+    tracing::trace!(
         "Processed key ({} bytes): {:?}",
         processed_bytes.len(),
         processed_bytes

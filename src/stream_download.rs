@@ -15,16 +15,17 @@ impl SourceStream for HLSStream {
 
     fn content_length(&self) -> ContentLength {
         let stream_length = self.content_length();
-        match stream_length.gathered {
-            Some(length) if length == stream_length.reported => ContentLength::Static(length),
-            Some(length) => ContentLength::Dynamic(DynamicLength {
-                reported: stream_length.reported,
-                gathered: Some(length),
-            }),
-            None => ContentLength::Dynamic(DynamicLength {
-                reported: stream_length.reported,
-                gathered: None,
-            }),
+        match stream_length.reported {
+            None => ContentLength::Unknown,
+            Some(reported_length) => match stream_length.gathered {
+                Some(gathered_length) if gathered_length == reported_length => {
+                    ContentLength::Static(reported_length)
+                }
+                _ => ContentLength::Dynamic(DynamicLength {
+                    reported: reported_length,
+                    gathered: stream_length.gathered,
+                }),
+            },
         }
     }
 
