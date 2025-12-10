@@ -1,7 +1,6 @@
 use std::io;
 
-use stream_download::source::SourceStream;
-use stream_download::storage::{ContentLength, DynamicLength};
+use stream_download::source::{ContentLength, DynamicLength, SourceStream};
 
 use crate::{config::Config, errors::HLSDecoderError, stream::HLSStream};
 
@@ -16,15 +15,12 @@ impl SourceStream for HLSStream {
     fn content_length(&self) -> ContentLength {
         let stream_length = self.content_length();
         match stream_length.reported {
-            None => ContentLength::Unknown,
+            None => ContentLength::new_unknown(),
             Some(reported_length) => match stream_length.gathered {
                 Some(gathered_length) if gathered_length == reported_length => {
-                    ContentLength::Static(reported_length)
+                    ContentLength::new_static(reported_length)
                 }
-                _ => ContentLength::Dynamic(DynamicLength {
-                    reported: reported_length,
-                    gathered: stream_length.gathered,
-                }),
+                _ => ContentLength::new_dynamic(reported_length, stream_length.gathered),
             },
         }
     }
